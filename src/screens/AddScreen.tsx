@@ -43,7 +43,12 @@ const VEL_MAX = 21;
 // 画面内のレイアウト割合
 const UFO_FRAC = 0.12; // UFOの表示y（ビューポート比）
 const READY_FRAC = 0.26; // 待機ボールの表示y
-const FOLLOW_FRAC = 0.4; // 山の上端を画面のこの位置に置く
+// 山は基本動かさない。積み上がって上端がこの線を超えたら…
+const TOP_LIMIT_FRAC = 0.36;
+// …ちょっとだけ下げて、上端をこの位置に戻す
+const PILE_RESET_FRAC = 0.48;
+// 初期表示で山の上端を置く位置（やや低め＝上に投入余地）
+const PILE_INIT_FRAC = 0.56;
 
 const UFO_SIZE = 58;
 const UFO_OFF = 70;
@@ -88,7 +93,7 @@ function AddScreen({ entries, onAdd }: Props) {
 
   const target = useMemo(() => targetForToday(), []);
 
-  const { balls, pileTopY, activeCount, groundY, drop, seed, setTarget, consumeHit } = useBoxPhysics({
+  const { balls, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit } = useBoxPhysics({
     width: area.w,
     ballSize: BALL,
   });
@@ -96,16 +101,16 @@ function AddScreen({ entries, onAdd }: Props) {
   // 最新値を ref に同期（コールバック/ループ用）
   const areaRef = useRef(area);
   areaRef.current = area;
-  const pileTopRef = useRef(pileTopY);
-  pileTopRef.current = pileTopY;
-  const activeRef = useRef(activeCount);
-  activeRef.current = activeCount;
+  const restTopRef = useRef(restTopY);
+  restTopRef.current = restTopY;
 
+  // 手動スクロールの範囲（上端＝ライブ表示、下端＝箱の底）
   const camBounds = useCallback(() => {
     const a = areaRef.current;
-    const followTarget = pileTopRef.current - a.h * FOLLOW_FRAC;
-    const camMax = Math.max(followTarget, groundY - a.h * 0.78);
-    return { followTarget, camMin: followTarget, camMax };
+    const liveCam = restTopRef.current - a.h * PILE_RESET_FRAC;
+    const camMin = liveCam - a.h * 0.15; // 少しだけ上も覗ける
+    const camMax = Math.max(liveCam, groundY - a.h * 0.8); // 下スクロールで底
+    return { liveCam, camMin, camMax };
   }, [groundY]);
 
   // 残数・デバッグ
@@ -123,29 +128,40 @@ function AddScreen({ entries, onAdd }: Props) {
     }
   }, [area.w, area.h, entries, seed]);
 
-  // pileTop が分かったら初回だけカメラを合わせる
+  // 山が分かったら初回だけカメラを合わせる（上端を PILE_INIT_FRAC に）
   const camInitRef = useRef(false);
   useEffect(() => {
-    if (!camInitRef.current && area.h > 0 && pileTopY < groundY) {
+    if (!camInitRef.current && area.h > 0 && restTopY < groundY) {
       camInitRef.current = true;
-      const c = clamp(pileTopY - area.h * FOLLOW_FRAC, pileTopY - area.h, groundY);
-      setCameraY(c);
+      setCameraY(restTopY - area.h * PILE_INIT_FRAC);
     }
-  }, [pileTopY, area.h, groundY]);
+  }, [restTopY, area.h, groundY]);
 
-  // カメラ追従ループ
+  // カメラのラチェット：山は基本固定。積み上がって上端が上限線を超えたら発動し、
+  // 上端が PILE_RESET_FRAC に戻るまでゆっくり下げる（ヒステリシス）。
+  const ratchetingRef = useRef(false);
   useEffect(() => {
     let on = true;
     let raf = 0;
     const tick = () => {
       if (!on) return;
       if (followRef.current) {
-        const { followTarget, camMax } = camBounds();
-        const tgt = clamp(followTarget, followTarget, camMax);
-        setCameraY((prev) => {
-          const next = prev + (tgt - prev) * 0.2;
-          return Math.abs(next - prev) < 0.4 ? tgt : next;
-        });
+        const a = areaRef.current;
+        if (a.h > 0) {
+          const restScreenY = restTopRef.current - cameraYRef.current;
+          if (restScreenY < a.h * TOP_LIMIT_FRAC) ratchetingRef.current = true;
+          if (ratchetingRef.current) {
+            const tgt = restTopRef.current - a.h * PILE_RESET_FRAC; // 下げ先
+            setCameraY((prev) => {
+              const next = prev + (tgt - prev) * 0.08; // ゆっくり
+              if (Math.abs(next - prev) < 0.4) {
+                ratchetingRef.current = false;
+                return tgt;
+              }
+              return next;
+            });
+          }
+        }
       }
       raf = requestAnimationFrame(tick);
     };
@@ -154,7 +170,7 @@ function AddScreen({ entries, onAdd }: Props) {
       on = false;
       cancelAnimationFrame(raf);
     };
-  }, [camBounds]);
+  }, []);
 
   // UFO 往復
   useEffect(() => {
@@ -278,8 +294,8 @@ function AddScreen({ entries, onAdd }: Props) {
         followRef.current = false;
         camStartRef.current = cameraYRef.current;
       } else if (st === State.END || st === State.CANCELLED || st === State.FAILED) {
-        const { followTarget } = camBounds();
-        if (cameraYRef.current <= followTarget + 40) followRef.current = true;
+        const { liveCam } = camBounds();
+        if (cameraYRef.current <= liveCam + 40) followRef.current = true;
       }
     },
     [camBounds]

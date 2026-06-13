@@ -28,7 +28,7 @@ interface Options {
 
 interface BoxApi {
   balls: BoxBall[];
-  pileTopY: number; // 山の最上端（最小y）
+  restTopY: number; // 着地済みの山の最上端（飛行中は無視）
   activeCount: number; // 動いているボール数
   groundY: number;
   /** 箱に1つ投入（ワールド座標 x,y と初速 vx,vy） */
@@ -57,8 +57,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   const seededRef = useRef(false);
 
   const [balls, setBalls] = useState<BoxBall[]>([]);
-  const pileTopRef = useRef(GROUND_Y);
-  const [meta, setMeta] = useState({ pileTopY: GROUND_Y, activeCount: 0 });
+  const restTopRef = useRef(GROUND_Y);
+  const [meta, setMeta] = useState({ restTopY: GROUND_Y, activeCount: 0 });
 
   useEffect(() => {
     if (width <= 0) return;
@@ -85,13 +85,13 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
       const tgt = targetRef.current;
       let activeCount = 0;
-      let pileTop = GROUND_Y;
+      let restTop = Infinity; // 眠っている（着地済み）ボールの最上端
       const render: BoxBall[] = [];
       for (const b of Matter.Composite.allBodies(engine.world)) {
         const m = metaRef.current.get(b.id);
         if (!m) continue;
         if (!b.isSleeping) activeCount++;
-        if (b.position.y - m.size / 2 < pileTop) pileTop = b.position.y - m.size / 2;
+        else if (b.position.y - m.size / 2 < restTop) restTop = b.position.y - m.size / 2;
         // ターゲット命中（上昇中に1回だけ）
         if (tgt && !m.hitUfo && !b.isSleeping) {
           const dx = b.position.x - tgt.x;
@@ -111,12 +111,12 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
           size: m.size,
         });
       }
-      pileTopRef.current = pileTop;
+      if (restTop !== Infinity) restTopRef.current = restTop;
 
       // アクティブが居る間だけ描画更新（アイドル時は再描画しない）
       if (activeCount > 0 || prevActive !== 0) {
         setBalls(render);
-        setMeta({ pileTopY: pileTop, activeCount });
+        setMeta({ restTopY: restTopRef.current, activeCount });
       }
       prevActive = activeCount;
       rafRef.current = requestAnimationFrame(loop);
@@ -191,9 +191,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         if (b.position.y - m.size / 2 < pileTop) pileTop = b.position.y - m.size / 2;
         render.push({ bodyId: b.id, emotion: m.emotion, variation: m.variation, x: b.position.x, y: b.position.y, angle: b.angle, size: m.size });
       }
-      pileTopRef.current = pileTop;
+      restTopRef.current = pileTop;
       setBalls(render);
-      setMeta({ pileTopY: pileTop, activeCount: 0 });
+      setMeta({ restTopY: pileTop, activeCount: 0 });
     },
     [addBody, ballSize, width]
   );
@@ -210,7 +210,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
   return {
     balls,
-    pileTopY: meta.pileTopY,
+    restTopY: meta.restTopY,
     activeCount: meta.activeCount,
     groundY: GROUND_Y,
     drop,
