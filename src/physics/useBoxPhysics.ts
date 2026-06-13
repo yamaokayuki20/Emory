@@ -42,6 +42,9 @@ interface BoxApi {
 
 const WALL = 80;
 const GROUND_Y = 40000; // 箱の底（ワールド）。山はここから上へ積み上がる。
+// 山頂からこの深さ（ボール径の倍数）までを「動的に反応する上層」とし、
+// それより下の眠ったボールは静的に固定する（要調整ポイント）。
+const ACTIVE_DEPTH_ROWS = 6;
 
 // 決定論的な疑似乱数（id をシード, -1..1）
 function jitter(seed: string, salt: number): number {
@@ -92,16 +95,23 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
       const tgt = targetRef.current;
       let activeCount = 0;
-      let restTop = Infinity; // 眠っている（着地済み）ボールの最上端
+      let settledTop = Infinity; // 着地済み（静的 or 眠り）の最上端
       let allMin = Infinity; // 全ボールの最上端（settle中のフォールバック）
+      // 山頂から一定の深さより下の眠りボールは静的化（下層は固定、上層だけ動的）
+      const freezeLine = restTopRef.current + ballSize * ACTIVE_DEPTH_ROWS;
       const render: BoxBall[] = [];
       for (const b of Matter.Composite.allBodies(engine.world)) {
         const m = metaRef.current.get(b.id);
         if (!m) continue;
         const top = b.position.y - m.size / 2;
         if (top < allMin) allMin = top;
-        if (b.isSleeping) {
-          if (top < restTop) restTop = top;
+        const settled = b.isStatic || b.isSleeping;
+        if (settled) {
+          if (top < settledTop) settledTop = top;
+          // 深い位置の眠りボールは固定（上層だけ動的に残す）
+          if (!b.isStatic && b.isSleeping && b.position.y > freezeLine) {
+            Matter.Body.setStatic(b, true);
+          }
         } else {
           activeCount++;
           // ターゲット命中（上昇中に1回だけ）
@@ -124,7 +134,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
           size: m.size,
         });
       }
-      if (restTop !== Infinity) restTopRef.current = restTop;
+      if (settledTop !== Infinity) restTopRef.current = settledTop;
       else if (allMin !== Infinity) restTopRef.current = allMin;
 
       // アクティブが居る間だけ描画更新（アイドル時は再描画しない）
