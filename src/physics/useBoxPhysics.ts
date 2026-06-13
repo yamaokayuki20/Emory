@@ -92,18 +92,16 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
       const tgt = targetRef.current;
       let activeCount = 0;
-      let restTop = Infinity; // 着地済み（静的）ボールの最上端
+      let restTop = Infinity; // 眠っている（着地済み）ボールの最上端
+      let allMin = Infinity; // 全ボールの最上端（settle中のフォールバック）
       const render: BoxBall[] = [];
       for (const b of Matter.Composite.allBodies(engine.world)) {
         const m = metaRef.current.get(b.id);
         if (!m) continue;
-        // 落ち着いた（眠った）動的ボールは静的に固定して、以後崩れ・浮きを防ぐ
-        if (!b.isStatic && b.isSleeping) {
-          Matter.Body.setStatic(b, true);
-        }
-        const settled = b.isStatic;
-        if (settled) {
-          if (b.position.y - m.size / 2 < restTop) restTop = b.position.y - m.size / 2;
+        const top = b.position.y - m.size / 2;
+        if (top < allMin) allMin = top;
+        if (b.isSleeping) {
+          if (top < restTop) restTop = top;
         } else {
           activeCount++;
           // ターゲット命中（上昇中に1回だけ）
@@ -127,6 +125,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         });
       }
       if (restTop !== Infinity) restTopRef.current = restTop;
+      else if (allMin !== Infinity) restTopRef.current = allMin;
 
       // アクティブが居る間だけ描画更新（アイドル時は再描画しない）
       if (activeCount > 0 || prevActive !== 0) {
@@ -149,17 +148,18 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   }, [width]);
 
   const addBody = useCallback(
-    (emotion: EmotionKey, variation: number, x: number, y: number, isStatic: boolean) => {
+    (emotion: EmotionKey, variation: number, x: number, y: number) => {
       const engine = engineRef.current;
       if (!engine) return;
+      // 当たり半径を見た目のボール（径の約0.84＝半径0.42）に合わせ、
+      // slop を小さくして「絶対に重ならない」。固定はしない（動的＝衝撃に反応）。
       const body = Matter.Bodies.circle(x, y, ballSize * 0.42, {
-        isStatic,
-        restitution: 0.52, // よく弾む（ポンポン）
-        friction: 0.45,
-        frictionStatic: 0.6,
-        frictionAir: 0.008,
+        restitution: 0.5, // よく弾む（ポンポン）
+        friction: 0.5,
+        frictionStatic: 0.7,
+        frictionAir: 0.01,
         density: 0.0016,
-        slop: 0.02,
+        slop: 0.005,
       });
       metaRef.current.set(body.id, { emotion, variation, size: ballSize, hitUfo: false });
       Matter.Composite.add(engine.world, body);
@@ -170,7 +170,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
   const drop = useCallback(
     (emotion: EmotionKey, variation: number, x: number, y: number, vx: number, vy: number) => {
-      const body = addBody(emotion, variation, x, y, false);
+      const body = addBody(emotion, variation, x, y);
       if (body) Matter.Body.setVelocity(body, { x: vx, y: vy });
     },
     [addBody]
@@ -180,45 +180,33 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     (entries: EmotionEntry[]) => {
       if (seededRef.current || !engineRef.current || width <= 0) return;
       seededRef.current = true;
-      // 古い順に底から積む（新しいものほど上）
-      const sorted = [...entries].sort(
-        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-      );
-      // 見た目のボール（余白を除くと径の約0.84）がほぼ接するピッチ。
-      // ヘックス＋ジッターでランダムに積まれた見た目にする。
-      const stepX = ballSize * 0.84;
-      const stepY = ballSize * 0.72;
+      // 古い順に底から。性能のため直近に上限を設ける。
+      const sorted = [...entries]
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+        .slice(-250);
+      // やや緩めに置いて、物理で自然に詰めさせる（重なり無し・ランダム）。
+      const stepX = ballSize * 0.95;
+      const stepY = ballSize * 0.9;
       const cols = Math.max(1, Math.floor(width / stepX));
       const pitchX = width / cols;
       let idx = 0;
       let row = 0;
       while (idx < sorted.length) {
         const even = row % 2 === 0;
-        const n = even ? cols : Math.max(1, cols - 1); // オフセット行は1つ減らして右端の被りを防ぐ
+        const n = even ? cols : Math.max(1, cols - 1); // オフセット行は右端の被り防止に1つ減らす
         const base = even ? pitchX / 2 : pitchX;
         for (let c = 0; c < n && idx < sorted.length; c++) {
           const e = sorted[idx++];
-          const jx = jitter(e.id, 7) * ballSize * 0.16;
-          const jy = jitter(e.id, 13) * ballSize * 0.14;
+          const jx = jitter(e.id, 7) * ballSize * 0.05;
+          const jy = jitter(e.id, 13) * ballSize * 0.05;
           let x = base + c * pitchX + jx;
           x = Math.max(ballSize / 2 + 2, Math.min(width - ballSize / 2 - 2, x));
           const y = GROUND_Y - ballSize / 2 - row * stepY + jy;
-          addBody(e.emotion, e.variation, x, y, true); // 静的に固定
+          addBody(e.emotion, e.variation, x, y); // 動的・awake → 落ちて自然に密パック
         }
         row++;
       }
-      // 初期描画
-      const render: BoxBall[] = [];
-      let pileTop = GROUND_Y;
-      for (const b of Matter.Composite.allBodies(engineRef.current.world)) {
-        const m = metaRef.current.get(b.id);
-        if (!m) continue;
-        if (b.position.y - m.size / 2 < pileTop) pileTop = b.position.y - m.size / 2;
-        render.push({ bodyId: b.id, emotion: m.emotion, variation: m.variation, x: b.position.x, y: b.position.y, angle: b.angle, size: m.size });
-      }
-      restTopRef.current = pileTop;
-      setBalls(render);
-      setMeta({ restTopY: pileTop, activeCount: 0 });
+      // 描画と最上端は RAF ループが拾う（settle 中も毎フレーム更新）
     },
     [addBody, ballSize, width]
   );
