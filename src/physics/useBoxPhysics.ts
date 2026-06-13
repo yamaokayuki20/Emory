@@ -164,9 +164,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       // 当たり半径を見た目のボール（径の約0.84＝半径0.42）に合わせ、
       // slop を小さくして「絶対に重ならない」。固定はしない（動的＝衝撃に反応）。
       const body = Matter.Bodies.circle(x, y, ballSize * 0.42, {
-        restitution: 0.5, // よく弾む（ポンポン）
-        friction: 0.5,
-        frictionStatic: 0.7,
+        restitution: 0.32, // 軽く弾む（高すぎると不安定なので控えめ）
+        friction: 0.55,
+        frictionStatic: 0.8,
         frictionAir: 0.01,
         density: 0.0016,
         slop: 0.005,

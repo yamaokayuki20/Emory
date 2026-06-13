@@ -40,15 +40,14 @@ const STRETCH_K = 78;
 const STRETCH_TO_VEL = 0.14; // ×1.5
 const VEL_MAX = 21;
 
-// 画面内のレイアウト割合
-const UFO_FRAC = 0.12; // UFOの表示y（ビューポート比）
-const READY_FRAC = 0.26; // 待機ボールの表示y
-// 山は基本動かさない。積み上がって上端がこの線を超えたら…
-const TOP_LIMIT_FRAC = 0.36;
-// …ちょっとだけ下げて、上端をこの位置に戻す
-const PILE_RESET_FRAC = 0.48;
-// 初期表示で山の上端を置く位置（やや低め＝上に投入余地）
-const PILE_INIT_FRAC = 0.56;
+// 画面内のレイアウト割合（箱はヘッダー直下のフル高さ。上部にピッカーを半透明オーバーレイ）
+const UFO_FRAC = 0.18; // UFOの表示y（ピッカーの下）
+const READY_FRAC = 0.42; // 待機ボールの表示y
+// 山は基本動かさない。上端がこの帯[TOP..BOTTOM]の外に出たら、TARGET位置へ戻す。
+// （積み上がりすぎ＝上に出る／落ち切って画面外＝下に出る、の両方を補正）
+const TOP_LIMIT_FRAC = 0.34;
+const BOTTOM_LIMIT_FRAC = 0.72;
+const TARGET_FRAC = 0.5;
 
 const UFO_SIZE = 58;
 const UFO_OFF = 70;
@@ -69,7 +68,6 @@ function tension(dx: number, dy: number) {
 function AddScreen({ entries, onAdd }: Props) {
   const [area, setArea] = useState({ w: 0, h: 0 });
   const [selected, setSelected] = useState<EmotionKey>('happy');
-  const [memo, setMemo] = useState('');
   const [remaining, setRemaining] = useState(10);
   const [unlimited, setUnlimited] = useState(false);
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
@@ -107,7 +105,7 @@ function AddScreen({ entries, onAdd }: Props) {
   // 手動スクロールの範囲（上端＝ライブ表示、下端＝箱の底）
   const camBounds = useCallback(() => {
     const a = areaRef.current;
-    const liveCam = restTopRef.current - a.h * PILE_RESET_FRAC;
+    const liveCam = restTopRef.current - a.h * TARGET_FRAC;
     const camMin = liveCam - a.h * 0.15; // 少しだけ上も覗ける
     const camMax = Math.max(liveCam, groundY - a.h * 0.8); // 下スクロールで底
     return { liveCam, camMin, camMax };
@@ -128,18 +126,20 @@ function AddScreen({ entries, onAdd }: Props) {
     }
   }, [area.w, area.h, entries, seed]);
 
-  // 山が分かったら初回だけカメラを合わせる（上端を PILE_INIT_FRAC に）
+  // 山が分かったら初回だけカメラを合わせる（上端を TARGET_FRAC に＝即フレーミング）
   const camInitRef = useRef(false);
   useEffect(() => {
     if (!camInitRef.current && area.h > 0 && restTopY < groundY) {
       camInitRef.current = true;
-      setCameraY(restTopY - area.h * PILE_INIT_FRAC);
+      const c = restTopY - area.h * TARGET_FRAC;
+      cameraYRef.current = c;
+      setCameraY(c);
     }
   }, [restTopY, area.h, groundY]);
 
-  // カメラのラチェット：山は基本固定。積み上がって上端が上限線を超えたら発動し、
-  // 上端が PILE_RESET_FRAC に戻るまでゆっくり下げる（ヒステリシス）。
-  const ratchetingRef = useRef(false);
+  // カメラの帯補正：山の上端が帯[TOP..BOTTOM]の外に出たら TARGET へ戻す（ヒステリシス）。
+  // 上に出る＝積み上がりすぎ、下に出る＝落ち切って画面外、の両方を補正＝常に画面内に収める。
+  const correctingRef = useRef(false);
   useEffect(() => {
     let on = true;
     let raf = 0;
@@ -149,13 +149,15 @@ function AddScreen({ entries, onAdd }: Props) {
         const a = areaRef.current;
         if (a.h > 0) {
           const restScreenY = restTopRef.current - cameraYRef.current;
-          if (restScreenY < a.h * TOP_LIMIT_FRAC) ratchetingRef.current = true;
-          if (ratchetingRef.current) {
-            const tgt = restTopRef.current - a.h * PILE_RESET_FRAC; // 下げ先
+          if (restScreenY < a.h * TOP_LIMIT_FRAC || restScreenY > a.h * BOTTOM_LIMIT_FRAC) {
+            correctingRef.current = true;
+          }
+          if (correctingRef.current) {
+            const tgt = restTopRef.current - a.h * TARGET_FRAC;
             setCameraY((prev) => {
-              const next = prev + (tgt - prev) * 0.08; // ゆっくり
+              const next = prev + (tgt - prev) * 0.12;
               if (Math.abs(next - prev) < 0.4) {
-                ratchetingRef.current = false;
+                correctingRef.current = false;
                 return tgt;
               }
               return next;
@@ -248,19 +250,18 @@ function AddScreen({ entries, onAdd }: Props) {
         return;
       }
       setRemaining(state.remaining);
-      const entry = await onAdd(selected, memo);
+      const entry = await onAdd(selected);
       const a = areaRef.current;
       const worldX = a.w / 2;
       const worldY = cameraYRef.current + a.h * READY_FRAC;
       drop(selected, entry.variation, worldX, worldY, vx, vy);
-      setMemo('');
       followRef.current = true;
       // 飛翔が見えるよう、次の待機ボールは0.5s後に出す
       setReadyVisible(false);
       if (readyTimer.current) clearTimeout(readyTimer.current);
       readyTimer.current = setTimeout(() => setReadyVisible(true), 500);
     },
-    [selected, memo, onAdd, drop]
+    [selected, onAdd, drop]
   );
 
   const onSlingerState = useCallback(
@@ -335,11 +336,7 @@ function AddScreen({ entries, onAdd }: Props) {
     <View style={styles.screen}>
       <Header remaining={remaining} debugUnlimited={unlimited} onToggleDebug={toggleDebug} />
 
-      <View style={styles.picker}>
-        <EmotionPicker selected={selected} onSelect={setSelected} memo={memo} onChangeMemo={setMemo} />
-      </View>
-
-      {/* 箱 */}
+      {/* 箱（ヘッダー直下のフル高さ。上に半透明ピッカーを重ねる） */}
       <View style={styles.box} onLayout={onZoneLayout}>
         {/* 手動スクロール用の背景キャッチャ */}
         <PanGestureHandler onGestureEvent={onCamGesture} onHandlerStateChange={onCamState}>
@@ -406,6 +403,11 @@ function AddScreen({ entries, onAdd }: Props) {
             </View>
           </PanGestureHandler>
         )}
+
+        {/* 感情ピッカー（半透明オーバーレイ。奥を飛ぶ絵文字が透けて見える） */}
+        <View style={styles.pickerOverlay} pointerEvents="box-none">
+          <EmotionPicker selected={selected} onSelect={setSelected} />
+        </View>
       </View>
     </View>
   );
@@ -413,12 +415,14 @@ function AddScreen({ entries, onAdd }: Props) {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: bg.base, paddingTop: 8 },
-  picker: {
-    backgroundColor: bg.base,
-    paddingTop: 6,
-    paddingBottom: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: bg.line,
+  pickerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    paddingTop: 4,
+    paddingBottom: 8,
+    backgroundColor: 'rgba(243,236,224,0.55)', // 半透明：奥の絵文字が透ける
   },
   box: { flex: 1, position: 'relative', overflow: 'hidden', backgroundColor: bg.sunk },
   overlay: { position: 'absolute', left: 0, top: 0 },
