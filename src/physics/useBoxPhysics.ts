@@ -145,7 +145,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     (emotion: EmotionKey, variation: number, x: number, y: number, isStatic: boolean) => {
       const engine = engineRef.current;
       if (!engine) return;
-      const body = Matter.Bodies.circle(x, y, ballSize * 0.5, {
+      const body = Matter.Bodies.circle(x, y, ballSize * 0.42, {
         isStatic,
         restitution: 0.12,
         friction: 0.9,
@@ -177,8 +177,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       const sorted = [...entries].sort(
         (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
       );
-      const stepX = ballSize * 1.0;
-      const stepY = ballSize * 0.9;
+      // 見た目のボール（余白を除くと径の約0.84）がぴったり接するピッチ
+      const stepX = ballSize * 0.84;
+      const stepY = ballSize * 0.73;
       const cols = Math.max(1, Math.floor(width / stepX));
       const pitchX = width / cols;
       sorted.forEach((e, i) => {
