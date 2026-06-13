@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import {
   Pressable,
   ScrollView,
@@ -113,4 +113,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default EmotionPicker;
+export default memo(EmotionPicker);

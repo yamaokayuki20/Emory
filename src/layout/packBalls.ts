@@ -38,8 +38,8 @@ export function packBalls(entries: EmotionEntry[], opts: PackOptions): PackResul
   const size = opts.size ?? 46;
   const width = opts.width;
   const paddingTop = opts.paddingTop ?? 14;
-  const colStep = opts.colStep ?? 0.84; // ぎしっと詰める
-  const rowStep = opts.rowStep ?? 0.8;
+  const colStep = opts.colStep ?? 0.82; // ぎしっと詰める（重なり気味）
+  const rowStep = opts.rowStep ?? 0.78;
 
   // 新しい日付が上に来るよう降順
   const sorted = [...entries].sort(

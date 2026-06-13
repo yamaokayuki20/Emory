@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Svg, { Circle, Line, Path, Rect } from 'react-native-svg';
 
@@ -127,4 +127,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default Header;
+export default memo(Header);
