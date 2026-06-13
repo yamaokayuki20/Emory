@@ -1,10 +1,9 @@
 /**
- * 仕様デグレ監視（CI で実行）。
- * docs/仕様書.md の INVARIANTS のうち、純粋ロジックで検証できるものを自動チェックする。
- *
+ * 仕様デグレ監視（CI で実行）。docs/仕様書.md の INVARIANTS のうち
+ * 純粋ロジックで検証できるものを自動チェックする。
  * 実行: node scripts/check-spec.ts （Node 22 の型ストリップで直接実行）
  */
-import { computeSeedLayout, JITTER_X_RATIO, MIN_GAP_RATIO } from '../src/layout/seedLayout.ts';
+import { computeSeedLayout, BALL_RADIUS_RATIO } from '../src/layout/seedLayout.ts';
 
 type Entry = {
   id: string;
@@ -32,71 +31,55 @@ function makeEntries(n: number): Entry[] {
 
 let failed = 0;
 function check(name: string, cond: boolean, detail = '') {
-  if (cond) {
-    console.log(`  ✓ ${name}`);
-  } else {
+  if (cond) console.log(`  ✓ ${name}`);
+  else {
     failed++;
     console.error(`  ✗ ${name} ${detail}`);
   }
 }
 
-console.log('Spec check: 初期パイル配置');
+console.log('Spec check: 初期パイル配置（ドロップ・パッキング）');
 
 const ballSize = 46;
 const width = 360;
 const groundY = 40000;
-const { placements } = computeSeedLayout(makeEntries(80) as any, { width, ballSize, groundY });
+const N = 90;
+const { placements } = computeSeedLayout(makeEntries(N) as any, { width, ballSize, groundY });
 
-check('配置が存在する', placements.length > 0, `(len=${placements.length})`);
+const r = ballSize * BALL_RADIUS_RATIO;
+const d = 2 * r; // 接触距離（=見た目の径）
 
-// INVARIANT 1: ランダム積層（整列していない）
-// x 座標がグリッド値に揃っていないこと＝distinct 値が多い／残差の分散が大きい。
-const xs = placements.map((p) => p.x);
-const distinctX = new Set(xs.map((x) => Math.round(x))).size;
-check(
-  'ランダム性: x座標がほぼ全てユニーク（整列していない）',
-  distinctX >= placements.length * 0.8,
-  `(distinct=${distinctX}/${placements.length})`
-);
+check('配置が存在する', placements.length === N, `(len=${placements.length})`);
 
-// 横ジッターの実効量（標準偏差）が径の一定割合以上
-const stepX = ballSize * 0.92;
-const residuals = xs.map((x) => {
-  const r = ((x % stepX) + stepX) % stepX;
-  return r - stepX / 2; // -stepX/2..stepX/2
+// 各ボールの最近接中心間距離
+const nn: number[] = placements.map((a, i) => {
+  let m = Infinity;
+  placements.forEach((b, j) => {
+    if (i === j) return;
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    if (dist < m) m = dist;
+  });
+  return m;
 });
-const mean = residuals.reduce((a, b) => a + b, 0) / residuals.length;
-const std = Math.sqrt(residuals.reduce((a, b) => a + (b - mean) ** 2, 0) / residuals.length);
-check(
-  '横ジッターが効いている（残差stdが径の5%以上）',
-  std > ballSize * 0.05,
-  `(std=${std.toFixed(2)}, need>${(ballSize * 0.05).toFixed(2)})`
-);
+const minNN = Math.min(...nn);
+const sortedNN = [...nn].sort((a, b) => a - b);
+const medianNN = sortedNN[Math.floor(sortedNN.length / 2)];
 
-// ジッター設定自体が十分（仕様の下限）
-check('JITTER_X_RATIO が下限以上', JITTER_X_RATIO >= 0.12, `(=${JITTER_X_RATIO})`);
+// INVARIANT: 重ならない（最近接 >= 径）
+check('重なり無し: 最近接中心間距離 >= 径', minNN >= d - 0.6, `(min=${minNN.toFixed(2)}, d=${d.toFixed(2)})`);
 
-// 縦方向にも段（行）がある＝1行に潰れていない
-const ys = placements.map((p) => Math.round(p.y));
-const distinctRows = new Set(ys.map((y) => Math.round(y / (ballSize * 0.4)))).size;
-check('複数行に積まれている', distinctRows >= 3, `(rows~=${distinctRows})`);
+// INVARIANT: 隙間が空きすぎない（接して積まれている＝中央値が径に近い）
+check('隙間なし: 最近接の中央値が径の1.08倍以内', medianNN <= d * 1.08, `(median=${medianNN.toFixed(2)}, d=${d.toFixed(2)})`);
 
-// INVARIANT 2: 重ならない（配置時点で同一行の左右が径未満に近接しない）
-const diameter = ballSize * 0.84; // 見た目のボール径
-let minPairGap = Infinity;
-for (const a of placements) {
-  for (const b of placements) {
-    if (a === b) continue;
-    const d = Math.hypot(a.x - b.x, a.y - b.y);
-    if (d < minPairGap) minPairGap = d;
-  }
-}
-check(
-  '重なり無し: 最近接中心間距離が見た目の径以上',
-  minPairGap >= diameter - 0.5,
-  `(min=${minPairGap.toFixed(2)}, need>=${diameter.toFixed(2)})`
-);
-check('MIN_GAP_RATIO が径以上', MIN_GAP_RATIO >= 0.84, `(=${MIN_GAP_RATIO})`);
+// INVARIANT: ランダム（整列していない）= y が連続的にばらける（行に潰れない）
+const distinctY = new Set(placements.map((p) => Math.round(p.y))).size;
+check('ランダム: y がほぼ全てユニーク（行整列でない）', distinctY >= N * 0.6, `(distinctY=${distinctY}/${N})`);
+
+const distinctX = new Set(placements.map((p) => Math.round(p.x))).size;
+check('ランダム: x がほぼ全てユニーク', distinctX >= N * 0.8, `(distinctX=${distinctX}/${N})`);
+
+// 物理ボディ半径と一致していること（接触＝見た目接触の前提）
+check('BALL_RADIUS_RATIO が見た目に一致(≈0.42)', Math.abs(BALL_RADIUS_RATIO - 0.42) < 0.02, `(=${BALL_RADIUS_RATIO})`);
 
 if (failed > 0) {
   console.error(`\nSPEC CHECK FAILED: ${failed} 件のデグレを検出`);
