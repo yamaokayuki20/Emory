@@ -7,6 +7,9 @@ import { bg, text } from '../theme/colors';
 interface Props {
   /** 残り投擲数（控えめに表示） */
   remaining?: number;
+  /** デバッグ: 投擲制限の解除状態 */
+  debugUnlimited?: boolean;
+  onToggleDebug?: () => void;
   onPressCalendar?: () => void;
   onPressMenu?: () => void;
 }
@@ -16,7 +19,7 @@ interface Props {
  * 左: シンプルな顔アイコン / 中央: アプリ名「エモリー」/ 右: カレンダー・メニュー
  * 残り投擲数は右肩に控えめなドットで表示。
  */
-function Header({ remaining, onPressCalendar, onPressMenu }: Props) {
+function Header({ remaining, debugUnlimited, onToggleDebug, onPressCalendar, onPressMenu }: Props) {
   return (
     <View style={styles.wrap}>
       <View style={styles.bar}>
@@ -31,7 +34,18 @@ function Header({ remaining, onPressCalendar, onPressMenu }: Props) {
         </View>
 
         <View style={styles.right}>
-          {remaining !== undefined && <ThrowDots remaining={remaining} />}
+          {onToggleDebug && (
+            <Pressable
+              hitSlop={8}
+              onPress={onToggleDebug}
+              style={[styles.debugBtn, debugUnlimited && styles.debugBtnOn]}
+            >
+              <Text style={[styles.debugTxt, debugUnlimited && styles.debugTxtOn]}>
+                {debugUnlimited ? '∞ 解除中' : '制限解除'}
+              </Text>
+            </Pressable>
+          )}
+          {remaining !== undefined && !debugUnlimited && <ThrowDots remaining={remaining} />}
           <Pressable hitSlop={10} onPress={onPressCalendar} style={styles.iconBtn}>
             <Svg width={20} height={20} viewBox="0 0 20 20">
               <Rect x={2.5} y={3.5} width={15} height={14} rx={3} stroke={text.secondary} strokeWidth={1.5} fill="none" />
@@ -90,6 +104,27 @@ const styles = StyleSheet.create({
   iconBtn: { padding: 2 },
   dots: { flexDirection: 'row', gap: 2, marginRight: 4, maxWidth: 60, flexWrap: 'wrap' },
   dot: { width: 4, height: 4, borderRadius: 2 },
+  debugBtn: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: bg.line,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    marginRight: 2,
+  },
+  debugBtnOn: {
+    backgroundColor: '#C57B57',
+    borderColor: '#C57B57',
+  },
+  debugTxt: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: text.faint,
+    letterSpacing: 0.5,
+  },
+  debugTxtOn: {
+    color: '#FFFFFF',
+  },
 });
 
 export default Header;

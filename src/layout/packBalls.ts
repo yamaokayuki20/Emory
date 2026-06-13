@@ -2,9 +2,9 @@ import { EmotionEntry } from '../storage/entries';
 
 /**
  * アーカイブ用の決定論的な密パック・レイアウト。
- * カードやグリッドではなく「画面いっぱいにギチギチに詰まった」見た目を、
- * 行ごとにオフセットを付けたヘックス配置＋わずかなジッターで表現する。
- * 日付ごとにまとめて配置し、各日の帯の境界 y を返す。
+ * 日付で区切らず、画面いっぱいに「隙間なくギチギチ」に上から積む（ボールピット風）。
+ * ヘックス配置（行ごとに半ピッチずらす）＋わずかなジッターで自然な密集感を出す。
+ * 新しい記録ほど上に来る（重力で上に積み上がっていくイメージ）。
  */
 
 export interface PackedBall {
@@ -14,28 +14,9 @@ export interface PackedBall {
   size: number;
 }
 
-export interface DateBand {
-  label: string; // 例: 5/18
-  key: string; // YYYY-MM-DD
-  // 帯の上端Y（点線・日付ピルをここに置く）
-  top: number;
-  centerY: number;
-}
-
 export interface PackResult {
   balls: PackedBall[];
-  bands: DateBand[];
   height: number;
-}
-
-function dayKey(iso: string): string {
-  const d = new Date(iso);
-  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-}
-
-function dayLabel(iso: string): string {
-  const d = new Date(iso);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 // 決定論的な疑似乱数（id をシード）
@@ -49,61 +30,47 @@ export interface PackOptions {
   width: number;
   size?: number; // ボール径
   paddingTop?: number;
-  bandGap?: number; // 日付帯の間隔
-  rowOverlap?: number; // 行を詰める係数（0=隙間なめ、正で重なる）
+  colStep?: number; // 横ピッチ係数（<1で重なる）
+  rowStep?: number; // 縦ピッチ係数（<1で重なる）
 }
 
 export function packBalls(entries: EmotionEntry[], opts: PackOptions): PackResult {
   const size = opts.size ?? 46;
   const width = opts.width;
-  const paddingTop = opts.paddingTop ?? 20;
-  const bandGap = opts.bandGap ?? 26;
-  const rowOverlap = opts.rowOverlap ?? 0.14;
+  const paddingTop = opts.paddingTop ?? 14;
+  const colStep = opts.colStep ?? 0.84; // ぎしっと詰める
+  const rowStep = opts.rowStep ?? 0.8;
 
-  // 新しい日付が上に来るよう降順でグループ化
+  // 新しい日付が上に来るよう降順
   const sorted = [...entries].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
 
-  const groups: { key: string; label: string; items: EmotionEntry[] }[] = [];
-  for (const e of sorted) {
-    const k = dayKey(e.createdAt);
-    const last = groups[groups.length - 1];
-    if (last && last.key === k) last.items.push(e);
-    else groups.push({ key: k, label: dayLabel(e.createdAt), items: [e] });
-  }
-
-  const cols = Math.max(1, Math.floor(width / (size * 0.92)));
-  const stepX = width / cols;
-  const rowH = size * (1 - rowOverlap);
+  const stepX = size * colStep;
+  const stepY = size * rowStep;
+  const cols = Math.max(1, Math.round(width / stepX));
+  // 列を画面幅に均等割り付け（端まできっちり詰める）
+  const pitchX = width / cols;
 
   const balls: PackedBall[] = [];
-  const bands: DateBand[] = [];
-  let y = paddingTop;
-
-  for (const g of groups) {
-    const bandTop = y - bandGap * 0.5;
-    bands.push({ label: g.label, key: g.key, top: bandTop, centerY: y });
-
-    const items = g.items;
-    let idx = 0;
-    let row = 0;
-    while (idx < items.length) {
-      const offset = row % 2 === 0 ? 0 : stepX / 2;
-      for (let c = 0; c < cols && idx < items.length; c++) {
-        const e = items[idx++];
-        const jx = jitter(e.id, 7) * size * 0.1;
-        const jy = jitter(e.id, 13) * size * 0.08;
-        let cx = offset + stepX * c + stepX / 2 + jx;
-        // 端のはみ出しを軽く内側へ
-        cx = Math.max(size / 2, Math.min(width - size / 2, cx));
-        balls.push({ entry: e, x: cx, y: y + rowH / 2 + jy, size });
-      }
-      y += rowH;
-      row++;
+  let idx = 0;
+  let row = 0;
+  while (idx < sorted.length) {
+    const offset = row % 2 === 0 ? 0 : pitchX / 2;
+    const y = paddingTop + size / 2 + row * stepY;
+    // 奇数行は半ピッチずれるので、はみ出さない範囲で列数を調整
+    const rowCols = offset > 0 ? cols : cols;
+    for (let c = 0; c < rowCols && idx < sorted.length; c++) {
+      const e = sorted[idx++];
+      const jx = jitter(e.id, 7) * size * 0.06;
+      const jy = jitter(e.id, 13) * size * 0.05;
+      let cx = offset + pitchX * c + pitchX / 2 + jx;
+      cx = Math.max(size / 2, Math.min(width - size / 2, cx));
+      balls.push({ entry: e, x: cx, y: y + jy, size });
     }
-    y += bandGap;
+    row++;
   }
 
-  return { balls, bands, height: y + size };
+  const height = paddingTop + size + Math.max(0, row - 1) * stepY + size / 2;
+  return { balls, height };
 }

@@ -20,12 +20,13 @@ import Svg, { Line, Path } from 'react-native-svg';
 
 import EmotionBall from '../components/EmotionBall';
 import EmotionPicker from '../components/EmotionPicker';
+import Fireworks from '../components/Fireworks';
 import Header from '../components/Header';
 import TrajectoryLine from '../components/TrajectoryLine';
 import { BasketHoop, Ufo, targetForToday } from '../components/targets';
 import { usePhysics } from '../physics/usePhysics';
 import { EmotionEntry } from '../storage/entries';
-import { consumeThrow, getThrowState } from '../storage/rateLimit';
+import { consumeThrow, getThrowState, isDebugUnlimited, setDebugUnlimited } from '../storage/rateLimit';
 import { bg, text } from '../theme/colors';
 import { EmotionKey, getEmotion } from '../theme/emotions';
 
@@ -36,8 +37,8 @@ interface Props {
 
 const BALL = 46;
 
-// 長押しでスリンガーモードに入るまでの溜め時間
-const CHARGE_MS = 2000;
+// 長押しでスリンガーモードに入るまでの溜め時間（1秒）
+const CHARGE_MS = 1000;
 // スリンガーの張力カーブ：引っ張るほど移動距離が縮む（ゴム的な抵抗）
 const STRETCH_MAX = 140; // 見かけ上の最大伸び（px）
 const STRETCH_K = 78; // 硬さ（大きいほどゆるい）
@@ -45,6 +46,13 @@ const STRETCH_TO_VEL = 0.095; // 伸び→発射速度
 const VEL_MAX = 14;
 // フリック判定
 const FLICK_SPEED = 260;
+
+// UFO（往復するマイクロインタラクション）
+const UFO_SIZE = 58;
+const UFO_Y = 0.18; // 操作エリア上部
+const UFO_OFF = 70; // 画面外へ出る余白
+const PATROL_MS = 5200; // 片道の所要
+const RESPAWN_MS = 2200; // 撃破後の再出現待ち
 
 const USE_NATIVE = Platform.OS !== 'web';
 
@@ -61,6 +69,7 @@ function AddScreen({ entries, onAdd }: Props) {
   const [selected, setSelected] = useState<EmotionKey>('happy');
   const [memo, setMemo] = useState('');
   const [remaining, setRemaining] = useState(10);
+  const [unlimited, setUnlimited] = useState(false);
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
   const [slinger, setSlinger] = useState(false);
   const seededRef = useRef(false);
@@ -74,6 +83,14 @@ function AddScreen({ entries, onAdd }: Props) {
   const charge = useRef(new Animated.Value(0)).current; // 0→1 溜め
   const pop = useRef(new Animated.Value(0)).current; // 起動時のポップ
 
+  // UFO 往復＆撃破
+  const ufoX = useRef(new Animated.Value(0)).current;
+  const [ufoVisible, setUfoVisible] = useState(true);
+  const ufoVisibleRef = useRef(true);
+  const ufoPosRef = useRef({ x: 0, y: 0 });
+  const [burst, setBurst] = useState<{ key: number; x: number; y: number } | null>(null);
+  const prevActiveRef = useRef(false);
+
   const target = useMemo(() => targetForToday(), []);
 
   const { balls, launch, seedPool, setTarget, targetActive } = usePhysics({
@@ -84,19 +101,14 @@ function AddScreen({ entries, onAdd }: Props) {
 
   // 発射点（積み上げの上・操作エリア中段）
   const launchPoint = useMemo(
-    () => ({ x: area.w / 2, y: area.h * 0.5 }),
+    () => ({ x: area.w / 2, y: area.h * 0.52 }),
     [area.w, area.h]
   );
 
-  // ターゲットの絶対座標
-  const targetPos = useMemo(
-    () => ({ x: area.w * target.anchor.x, y: area.h * target.anchor.y }),
-    [area.w, area.h, target]
-  );
-
-  // 残数読み込み
+  // 残数・デバッグフラグ読み込み
   useEffect(() => {
     getThrowState().then((s) => setRemaining(s.remaining));
+    isDebugUnlimited().then(setUnlimited);
   }, []);
 
   // 初期プール投入
@@ -107,10 +119,65 @@ function AddScreen({ entries, onAdd }: Props) {
     }
   }, [area.w, entries, seedPool]);
 
-  // ターゲット当たり判定を登録
+  // UFO 往復アニメーション
   useEffect(() => {
-    if (area.w > 0) setTarget({ x: targetPos.x, y: targetPos.y, r: target.hitRadius });
-  }, [area.w, targetPos, target.hitRadius, setTarget]);
+    if (area.w <= 0) return;
+    ufoX.setValue(0);
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(ufoX, {
+          toValue: 1,
+          duration: PATROL_MS,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: false,
+        }),
+        Animated.timing(ufoX, {
+          toValue: 0,
+          duration: PATROL_MS,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: false,
+        }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [area.w, area.h, ufoX]);
+
+  // UFO 位置に追従してターゲット当たり判定を更新
+  useEffect(() => {
+    if (area.w <= 0) return;
+    const y = area.h * UFO_Y;
+    const id = ufoX.addListener(({ value }) => {
+      const x = -UFO_OFF + value * (area.w + UFO_OFF * 2);
+      ufoPosRef.current = { x, y };
+      if (ufoVisibleRef.current) setTarget({ x, y, r: target.hitRadius });
+      else setTarget(null);
+    });
+    return () => ufoX.removeListener(id);
+  }, [area.w, area.h, target.hitRadius, setTarget, ufoX]);
+
+  // 命中の立ち上がりで花火＋UFO消滅＋再出現
+  const respawnTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (targetActive && !prevActiveRef.current && ufoVisibleRef.current) {
+      const { x, y } = ufoPosRef.current;
+      setBurst({ key: Date.now(), x, y });
+      ufoVisibleRef.current = false;
+      setUfoVisible(false);
+      setTarget(null);
+      if (respawnTimer.current) clearTimeout(respawnTimer.current);
+      respawnTimer.current = setTimeout(() => {
+        ufoVisibleRef.current = true;
+        setUfoVisible(true);
+      }, RESPAWN_MS);
+    }
+    prevActiveRef.current = targetActive;
+  }, [targetActive, setTarget]);
+
+  // アンマウント時にタイマー掃除
+  useEffect(() => () => {
+    if (respawnTimer.current) clearTimeout(respawnTimer.current);
+  }, []);
 
   const onLayout = useCallback((e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
@@ -161,7 +228,6 @@ function AddScreen({ entries, onAdd }: Props) {
     (e: LongPressGestureHandlerStateChangeEvent) => {
       const st = e.nativeEvent.state;
       if (st === State.BEGAN) {
-        // 触れた瞬間から溜め開始（CHARGE_MS で満タン）
         charge.setValue(0);
         Animated.timing(charge, {
           toValue: 1,
@@ -170,7 +236,6 @@ function AddScreen({ entries, onAdd }: Props) {
           useNativeDriver: USE_NATIVE,
         }).start();
       } else if (st === State.ACTIVE) {
-        // 溜め完了：スリンガーモードへ
         slingerRef.current = true;
         setSlinger(true);
         charge.setValue(1);
@@ -181,12 +246,7 @@ function AddScreen({ entries, onAdd }: Props) {
           tension: 120,
           useNativeDriver: USE_NATIVE,
         }).start();
-      } else if (
-        st === State.FAILED ||
-        st === State.CANCELLED ||
-        st === State.END
-      ) {
-        // スリンガー起動前に離した（＝フリック扱い）→ 溜めを戻す
+      } else if (st === State.FAILED || st === State.CANCELLED || st === State.END) {
         if (!slingerRef.current) {
           Animated.timing(charge, {
             toValue: 0,
@@ -209,7 +269,6 @@ function AddScreen({ entries, onAdd }: Props) {
       }
 
       if (slingerRef.current) {
-        // スリンガー：張力カーブの伸びに比例して、引いた逆向き（上）へ発射
         const s = tension(translationX, translationY);
         if (s.mag > 18) {
           const ux = s.x / s.mag;
@@ -221,20 +280,24 @@ function AddScreen({ entries, onAdd }: Props) {
         return;
       }
 
-      // フリック：弾いた方向へそのまま飛ばす
       const speed = Math.hypot(velocityX, velocityY);
       if (state === State.END && speed > FLICK_SPEED) {
-        const vx = velocityX * 0.013;
-        const vy = velocityY * 0.013;
-        void doLaunch(vx, vy);
+        void doLaunch(velocityX * 0.013, velocityY * 0.013);
       } else if (state === State.END && translationY < -50) {
-        // ゆっくり上へ引いて離す操作も拾う（保険）
         void doLaunch(translationX * 0.05, Math.min(-6, translationY * 0.06));
       }
       setDrag(null);
     },
     [doLaunch, resetSlinger]
   );
+
+  const toggleDebug = useCallback(async () => {
+    const next = !unlimited;
+    await setDebugUnlimited(next);
+    setUnlimited(next);
+    const s = await getThrowState();
+    setRemaining(s.remaining);
+  }, [unlimited]);
 
   // 見かけの伸び（スリンガー時は張力カーブを適用）
   const stretch = useMemo(() => {
@@ -253,29 +316,42 @@ function AddScreen({ entries, onAdd }: Props) {
   const ringScale = charge.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1.5] });
   const ringOpacity = charge.interpolate({ inputRange: [0, 0.05, 1], outputRange: [0, 0.18, 0.5] });
   const ballScale = pop.interpolate({ inputRange: [0, 1], outputRange: [1, 1.12] });
-  // 引くほど帯が細くなる＝張力が限界に近づく演出
   const bandWidth = Math.max(1.5, 7 - stretch.mag / 26);
+
+  const ufoTranslate = ufoX.interpolate({
+    inputRange: [0, 1],
+    outputRange: [-UFO_OFF - UFO_SIZE / 2, area.w + UFO_OFF - UFO_SIZE / 2],
+  });
 
   return (
     <View style={styles.screen}>
-      <Header remaining={remaining} />
+      <Header remaining={remaining} debugUnlimited={unlimited} onToggleDebug={toggleDebug} />
+
+      {/* 上部: 感情ピッカー＋ひとことメモ */}
+      <View style={styles.picker}>
+        <EmotionPicker selected={selected} onSelect={setSelected} memo={memo} onChangeMemo={setMemo} />
+      </View>
 
       <View style={styles.playArea} onLayout={onLayout}>
-        {/* ターゲット（日替わり） */}
-        {area.w > 0 && (
-          <View
+        {/* ターゲット（往復UFO） */}
+        {area.w > 0 && ufoVisible && (
+          <Animated.View
             style={[
               styles.target,
-              { left: targetPos.x - 48, top: targetPos.y - 30 },
+              {
+                top: area.h * UFO_Y - UFO_SIZE * 0.35,
+                width: UFO_SIZE,
+                transform: [{ translateX: ufoTranslate }],
+              },
             ]}
             pointerEvents="none"
           >
             {target.kind === 'ufo' ? (
-              <Ufo size={96} active={targetActive} />
+              <Ufo size={UFO_SIZE} active={targetActive} />
             ) : (
-              <BasketHoop size={96} active={targetActive} />
+              <BasketHoop size={UFO_SIZE} active={targetActive} />
             )}
-          </View>
+          </Animated.View>
         )}
 
         {/* 物理ボール（飛行中＋プール） */}
@@ -293,6 +369,9 @@ function AddScreen({ entries, onAdd }: Props) {
             }}
           />
         ))}
+
+        {/* 命中の花火 */}
+        {burst && <Fireworks key={burst.key} x={burst.x} y={burst.y} onDone={() => setBurst(null)} />}
 
         {/* 溜めエフェクト（発射点から広がるリング） */}
         {area.w > 0 && (
@@ -340,7 +419,7 @@ function AddScreen({ entries, onAdd }: Props) {
           </Svg>
         )}
 
-        {/* 予測軌道（スリンガー時のみ。引いた逆向きに弧を描く） */}
+        {/* 予測軌道（スリンガー時のみ） */}
         {slinger && drag && area.w > 0 && (
           <TrajectoryLine
             width={area.w}
@@ -401,10 +480,6 @@ function AddScreen({ entries, onAdd }: Props) {
           </LongPressGestureHandler>
         )}
       </View>
-
-      <View style={styles.picker}>
-        <EmotionPicker selected={selected} onSelect={setSelected} memo={memo} onChangeMemo={setMemo} />
-      </View>
     </View>
   );
 }
@@ -427,7 +502,7 @@ const styles = StyleSheet.create({
   },
   target: {
     position: 'absolute',
-    width: 96,
+    left: 0,
     alignItems: 'center',
   },
   ready: {
@@ -457,9 +532,10 @@ const styles = StyleSheet.create({
   },
   picker: {
     backgroundColor: bg.base,
+    paddingTop: 6,
     paddingBottom: 10,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: bg.line,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: bg.line,
   },
 });
 

@@ -8,8 +8,26 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
  */
 
 const THROWS_KEY = 'emory.throws';
+const DEBUG_KEY = 'emory.debugUnlimited';
 export const MAX_THROWS = 10;
 export const WINDOW_MS = 3 * 60 * 60 * 1000; // 3時間
+
+// デバッグ用: 投擲制限を無効化するフラグ（永続化）
+export async function isDebugUnlimited(): Promise<boolean> {
+  try {
+    return (await AsyncStorage.getItem(DEBUG_KEY)) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export async function setDebugUnlimited(on: boolean): Promise<void> {
+  try {
+    await AsyncStorage.setItem(DEBUG_KEY, on ? '1' : '0');
+  } catch {
+    /* noop */
+  }
+}
 
 export interface ThrowState {
   remaining: number;
@@ -33,6 +51,7 @@ function prune(stamps: number[], now: number): number[] {
 }
 
 export async function getThrowState(now: number = Date.now()): Promise<ThrowState> {
+  if (await isDebugUnlimited()) return { remaining: MAX_THROWS, recoverInMs: 0 };
   const stamps = prune(await loadStamps(), now);
   const remaining = Math.max(0, MAX_THROWS - stamps.length);
   let recoverInMs = 0;
@@ -44,6 +63,8 @@ export async function getThrowState(now: number = Date.now()): Promise<ThrowStat
 
 /** 1投を記録して新しい状態を返す。枠がなければ null。 */
 export async function consumeThrow(now: number = Date.now()): Promise<ThrowState | null> {
+  // デバッグ解除中は枠を消費せず常に投擲可
+  if (await isDebugUnlimited()) return { remaining: MAX_THROWS, recoverInMs: 0 };
   const stamps = prune(await loadStamps(), now);
   if (stamps.length >= MAX_THROWS) return null;
   stamps.push(now);
