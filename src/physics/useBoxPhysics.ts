@@ -189,11 +189,13 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         ballSize,
         groundY: GROUND_Y,
       });
-      // 動的・awake で投入 → 物理で settle し、重なりを解消して自然なランダム密パックに。
+      // 最初から眠らせて置く＝ロード時に settle で揺れない／カメラが動かない。
+      // 動的なので衝突時は wake して反応する。配置自体が重なり無し。
       for (const p of placements) {
-        addBody(p.emotion, p.variation, p.x, p.y);
+        const body = addBody(p.emotion, p.variation, p.x, p.y);
+        if (body) Matter.Sleeping.set(body, true);
       }
-      // 初期のカメラ基準＝配置した山頂（settle中もここで安定フレーミング）
+      // 初期のカメラ基準＝配置した山頂
       restTopRef.current = topY;
       setMeta({ restTopY: topY, activeCount: 0 });
     },

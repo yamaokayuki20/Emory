@@ -4,7 +4,7 @@
  *
  * 実行: node scripts/check-spec.ts （Node 22 の型ストリップで直接実行）
  */
-import { computeSeedLayout, JITTER_X_RATIO } from '../src/layout/seedLayout.ts';
+import { computeSeedLayout, JITTER_X_RATIO, MIN_GAP_RATIO } from '../src/layout/seedLayout.ts';
 
 type Entry = {
   id: string;
@@ -80,6 +80,23 @@ check('JITTER_X_RATIO が下限以上', JITTER_X_RATIO >= 0.12, `(=${JITTER_X_RA
 const ys = placements.map((p) => Math.round(p.y));
 const distinctRows = new Set(ys.map((y) => Math.round(y / (ballSize * 0.4)))).size;
 check('複数行に積まれている', distinctRows >= 3, `(rows~=${distinctRows})`);
+
+// INVARIANT 2: 重ならない（配置時点で同一行の左右が径未満に近接しない）
+const diameter = ballSize * 0.84; // 見た目のボール径
+let minPairGap = Infinity;
+for (const a of placements) {
+  for (const b of placements) {
+    if (a === b) continue;
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    if (d < minPairGap) minPairGap = d;
+  }
+}
+check(
+  '重なり無し: 最近接中心間距離が見た目の径以上',
+  minPairGap >= diameter - 0.5,
+  `(min=${minPairGap.toFixed(2)}, need>=${diameter.toFixed(2)})`
+);
+check('MIN_GAP_RATIO が径以上', MIN_GAP_RATIO >= 0.84, `(=${MIN_GAP_RATIO})`);
 
 if (failed > 0) {
   console.error(`\nSPEC CHECK FAILED: ${failed} 件のデグレを検出`);
