@@ -16,8 +16,8 @@ export interface TargetConfig {
  * MVPでは UFO とバスケットゴールの2種。? ブロック等は同じ仕組みで追加可能。
  */
 const ROTATION: TargetConfig[] = [
-  { kind: 'ufo', anchor: { x: 0.5, y: 0.22 }, hitRadius: 60 },
-  { kind: 'basket', anchor: { x: 0.78, y: 0.16 }, hitRadius: 48 },
+  { kind: 'ufo', anchor: { x: 0.5, y: 0.18 }, hitRadius: 34 },
+  { kind: 'basket', anchor: { x: 0.78, y: 0.16 }, hitRadius: 30 },
 ];
 
 export function dayOfYear(d: Date = new Date()): number {
