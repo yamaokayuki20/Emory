@@ -137,7 +137,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     (emotion: EmotionKey, variation: number, x: number, y: number, sleeping: boolean) => {
       const engine = engineRef.current;
       if (!engine) return;
-      const body = Matter.Bodies.circle(x, y, ballSize * 0.43, {
+      const body = Matter.Bodies.circle(x, y, ballSize * 0.5, {
         restitution: 0.18,
         friction: 0.85,
         frictionStatic: 1.2,
@@ -169,9 +169,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       const sorted = [...entries].sort(
         (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
       );
-      const stepX = ballSize * 0.86;
-      const stepY = ballSize * 0.76;
-      const cols = Math.max(1, Math.round(width / stepX));
+      const stepX = ballSize * 1.04;
+      const stepY = ballSize * 0.94;
+      const cols = Math.max(1, Math.floor(width / stepX));
       const pitchX = width / cols;
       sorted.forEach((e, i) => {
         const row = Math.floor(i / cols);
