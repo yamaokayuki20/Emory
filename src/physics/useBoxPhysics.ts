@@ -85,20 +85,28 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
       const tgt = targetRef.current;
       let activeCount = 0;
-      let restTop = Infinity; // 眠っている（着地済み）ボールの最上端
+      let restTop = Infinity; // 着地済み（静的）ボールの最上端
       const render: BoxBall[] = [];
       for (const b of Matter.Composite.allBodies(engine.world)) {
         const m = metaRef.current.get(b.id);
         if (!m) continue;
-        if (!b.isSleeping) activeCount++;
-        else if (b.position.y - m.size / 2 < restTop) restTop = b.position.y - m.size / 2;
-        // ターゲット命中（上昇中に1回だけ）
-        if (tgt && !m.hitUfo && !b.isSleeping) {
-          const dx = b.position.x - tgt.x;
-          const dy = b.position.y - tgt.y;
-          if (dx * dx + dy * dy < tgt.r * tgt.r) {
-            m.hitUfo = true;
-            hitRef.current = { x: tgt.x, y: tgt.y };
+        // 落ち着いた（眠った）動的ボールは静的に固定して、以後崩れ・浮きを防ぐ
+        if (!b.isStatic && b.isSleeping) {
+          Matter.Body.setStatic(b, true);
+        }
+        const settled = b.isStatic;
+        if (settled) {
+          if (b.position.y - m.size / 2 < restTop) restTop = b.position.y - m.size / 2;
+        } else {
+          activeCount++;
+          // ターゲット命中（上昇中に1回だけ）
+          if (tgt && !m.hitUfo) {
+            const dx = b.position.x - tgt.x;
+            const dy = b.position.y - tgt.y;
+            if (dx * dx + dy * dy < tgt.r * tgt.r) {
+              m.hitUfo = true;
+              hitRef.current = { x: tgt.x, y: tgt.y };
+            }
           }
         }
         render.push({
@@ -134,20 +142,20 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   }, [width]);
 
   const addBody = useCallback(
-    (emotion: EmotionKey, variation: number, x: number, y: number, sleeping: boolean) => {
+    (emotion: EmotionKey, variation: number, x: number, y: number, isStatic: boolean) => {
       const engine = engineRef.current;
       if (!engine) return;
       const body = Matter.Bodies.circle(x, y, ballSize * 0.5, {
-        restitution: 0.18,
-        friction: 0.85,
-        frictionStatic: 1.2,
-        frictionAir: 0.01,
+        isStatic,
+        restitution: 0.12,
+        friction: 0.9,
+        frictionStatic: 1.4,
+        frictionAir: 0.012,
         density: 0.0016,
         slop: 0.02,
       });
       metaRef.current.set(body.id, { emotion, variation, size: ballSize, hitUfo: false });
       Matter.Composite.add(engine.world, body);
-      if (sleeping) Matter.Sleeping.set(body, true);
       return body;
     },
     [ballSize]
@@ -169,8 +177,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       const sorted = [...entries].sort(
         (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
       );
-      const stepX = ballSize * 1.04;
-      const stepY = ballSize * 0.94;
+      const stepX = ballSize * 1.0;
+      const stepY = ballSize * 0.9;
       const cols = Math.max(1, Math.floor(width / stepX));
       const pitchX = width / cols;
       sorted.forEach((e, i) => {
@@ -180,7 +188,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         let x = offset + pitchX * col + pitchX / 2;
         x = Math.max(ballSize / 2 + 2, Math.min(width - ballSize / 2 - 2, x));
         const y = GROUND_Y - ballSize / 2 - row * stepY;
-        addBody(e.emotion, e.variation, x, y, true);
+        addBody(e.emotion, e.variation, x, y, true); // 静的に固定
       });
       // 初期描画
       const render: BoxBall[] = [];
