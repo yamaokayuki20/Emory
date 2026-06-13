@@ -3,7 +3,7 @@ name: Deploy web demo to GitHub Pages
 on:
   push:
     branches:
-      - claude/mvp-implementation-jcoiea
+      - main
   workflow_dispatch:
 
 permissions:
