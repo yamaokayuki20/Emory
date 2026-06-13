@@ -43,6 +43,13 @@ interface BoxApi {
 const WALL = 80;
 const GROUND_Y = 40000; // 箱の底（ワールド）。山はここから上へ積み上がる。
 
+// 決定論的な疑似乱数（id をシード, -1..1）
+function jitter(seed: string, salt: number): number {
+  let h = salt >>> 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return ((h % 1000) / 1000) * 2 - 1;
+}
+
 /**
  * 縦長の「箱」を1つの物理ワールドとして扱う。
  * - 下に重力。底に積もり、下ほどギチギチ。
@@ -147,10 +154,10 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       if (!engine) return;
       const body = Matter.Bodies.circle(x, y, ballSize * 0.42, {
         isStatic,
-        restitution: 0.12,
-        friction: 0.9,
-        frictionStatic: 1.4,
-        frictionAir: 0.012,
+        restitution: 0.52, // よく弾む（ポンポン）
+        friction: 0.45,
+        frictionStatic: 0.6,
+        frictionAir: 0.008,
         density: 0.0016,
         slop: 0.02,
       });
@@ -177,20 +184,29 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       const sorted = [...entries].sort(
         (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
       );
-      // 見た目のボール（余白を除くと径の約0.84）がぴったり接するピッチ
+      // 見た目のボール（余白を除くと径の約0.84）がほぼ接するピッチ。
+      // ヘックス＋ジッターでランダムに積まれた見た目にする。
       const stepX = ballSize * 0.84;
-      const stepY = ballSize * 0.73;
+      const stepY = ballSize * 0.72;
       const cols = Math.max(1, Math.floor(width / stepX));
       const pitchX = width / cols;
-      sorted.forEach((e, i) => {
-        const row = Math.floor(i / cols);
-        const col = i % cols;
-        const offset = row % 2 === 0 ? 0 : pitchX / 2;
-        let x = offset + pitchX * col + pitchX / 2;
-        x = Math.max(ballSize / 2 + 2, Math.min(width - ballSize / 2 - 2, x));
-        const y = GROUND_Y - ballSize / 2 - row * stepY;
-        addBody(e.emotion, e.variation, x, y, true); // 静的に固定
-      });
+      let idx = 0;
+      let row = 0;
+      while (idx < sorted.length) {
+        const even = row % 2 === 0;
+        const n = even ? cols : Math.max(1, cols - 1); // オフセット行は1つ減らして右端の被りを防ぐ
+        const base = even ? pitchX / 2 : pitchX;
+        for (let c = 0; c < n && idx < sorted.length; c++) {
+          const e = sorted[idx++];
+          const jx = jitter(e.id, 7) * ballSize * 0.16;
+          const jy = jitter(e.id, 13) * ballSize * 0.14;
+          let x = base + c * pitchX + jx;
+          x = Math.max(ballSize / 2 + 2, Math.min(width - ballSize / 2 - 2, x));
+          const y = GROUND_Y - ballSize / 2 - row * stepY + jy;
+          addBody(e.emotion, e.variation, x, y, true); // 静的に固定
+        }
+        row++;
+      }
       // 初期描画
       const render: BoxBall[] = [];
       let pileTop = GROUND_Y;
