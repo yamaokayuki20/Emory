@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { memo, useMemo, useState } from 'react';
 import { LayoutChangeEvent, StyleSheet, View } from 'react-native';
 
 import EmotionBall from '../components/EmotionBall';
@@ -54,4 +54,5 @@ const styles = StyleSheet.create({
   },
 });
 
-export default ArchiveScreen;
+// 物理ループによる親の再描画でパイル全体が再レンダリングされないよう memo 化
+export default memo(ArchiveScreen);
