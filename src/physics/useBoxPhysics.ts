@@ -96,7 +96,6 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       const tgt = targetRef.current;
       let activeCount = 0;
       let settledTop = Infinity; // 着地済み（静的 or 眠り）の最上端
-      let allMin = Infinity; // 全ボールの最上端（settle中のフォールバック）
       // 山頂から一定の深さより下の眠りボールは静的化（下層は固定、上層だけ動的）
       const freezeLine = restTopRef.current + ballSize * ACTIVE_DEPTH_ROWS;
       const render: BoxBall[] = [];
@@ -104,7 +103,6 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         const m = metaRef.current.get(b.id);
         if (!m) continue;
         const top = b.position.y - m.size / 2;
-        if (top < allMin) allMin = top;
         const settled = b.isStatic || b.isSleeping;
         if (settled) {
           if (top < settledTop) settledTop = top;
@@ -134,8 +132,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
           size: m.size,
         });
       }
+      // カメラ基準は「着地済み」の最上端のみ。落下中/跳ね中は無視（追わない）。
+      // 着地球がまだ無い間は前の値を保持する。
       if (settledTop !== Infinity) restTopRef.current = settledTop;
-      else if (allMin !== Infinity) restTopRef.current = allMin;
 
       // アクティブが居る間だけ描画更新（アイドル時は再描画しない）
       if (activeCount > 0 || prevActive !== 0) {
@@ -194,29 +193,35 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       const sorted = [...entries]
         .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
         .slice(-250);
-      // やや緩めに置いて、物理で自然に詰めさせる（重なり無し・ランダム）。
-      const stepX = ballSize * 0.95;
-      const stepY = ballSize * 0.9;
+      // 重ならない間隔のヘックス＋微ジッターで配置し、最初から眠らせる（揺れない）。
+      // 動的なので衝突時は wake して反応する。
+      const stepX = ballSize * 0.9;
+      const stepY = ballSize * 0.8;
       const cols = Math.max(1, Math.floor(width / stepX));
       const pitchX = width / cols;
       let idx = 0;
       let row = 0;
+      let minPlacedTop = GROUND_Y;
       while (idx < sorted.length) {
         const even = row % 2 === 0;
         const n = even ? cols : Math.max(1, cols - 1); // オフセット行は右端の被り防止に1つ減らす
         const base = even ? pitchX / 2 : pitchX;
         for (let c = 0; c < n && idx < sorted.length; c++) {
           const e = sorted[idx++];
-          const jx = jitter(e.id, 7) * ballSize * 0.05;
-          const jy = jitter(e.id, 13) * ballSize * 0.05;
+          const jx = jitter(e.id, 7) * ballSize * 0.04;
+          const jy = jitter(e.id, 13) * ballSize * 0.04;
           let x = base + c * pitchX + jx;
           x = Math.max(ballSize / 2 + 2, Math.min(width - ballSize / 2 - 2, x));
           const y = GROUND_Y - ballSize / 2 - row * stepY + jy;
-          addBody(e.emotion, e.variation, x, y); // 動的・awake → 落ちて自然に密パック
+          if (y - ballSize / 2 < minPlacedTop) minPlacedTop = y - ballSize / 2;
+          const body = addBody(e.emotion, e.variation, x, y);
+          if (body) Matter.Sleeping.set(body, true); // 最初から眠らせる
         }
         row++;
       }
-      // 描画と最上端は RAF ループが拾う（settle 中も毎フレーム更新）
+      // 初期のカメラ基準＝配置した山頂（settle中もここで安定フレーミング）
+      restTopRef.current = minPlacedTop;
+      setMeta({ restTopY: minPlacedTop, activeCount: 0 });
     },
     [addBody, ballSize, width]
   );
