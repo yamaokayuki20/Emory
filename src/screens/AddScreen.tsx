@@ -11,6 +11,8 @@ import {
   PanGestureHandler,
   PanGestureHandlerGestureEvent,
   PanGestureHandlerStateChangeEvent,
+  TapGestureHandler,
+  TapGestureHandlerStateChangeEvent,
   State,
 } from 'react-native-gesture-handler';
 import Svg, { Defs, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
@@ -35,7 +37,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b37 micro';
+const BUILD = 'b39 real';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -66,7 +68,6 @@ const FLICK_MAX = 18;
 
 // 画面内のレイアウト割合（箱はヘッダー直下のフル高さ。上部にピッカーを半透明オーバーレイ）
 const UFO_FRAC = 0.18; // UFOの表示y（ピッカーの下）
-const READY_FRAC = 0.42; // 待機ボールの表示y
 // 山は基本固定。積み上がって上端がこの線より高くなった時だけ、ゆっくり「下げる」。
 // 自動で上げる（せり上がる）挙動はしない。
 const TOP_LIMIT_FRAC = 0.3; // 上端がこれより上に来たら下げ補正発動
@@ -80,8 +81,8 @@ const RESPAWN_MS = 2200;
 
 // 固定バスケットゴール（上部・シュート用）
 const BASKET_W = 92;
-// 右端ぴったり（left は area.w から算出）
-const BASKET_TOP_FRAC = 0.12;
+// 右端ぴったり（left は area.w から算出）。少し下げて設置。
+const BASKET_TOP_FRAC = 0.24;
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
@@ -143,17 +144,13 @@ function AddScreen({ entries, onAdd }: Props) {
   const [selected, setSelected] = useState<EmotionKey>('happy');
   const [remaining, setRemaining] = useState(10);
   const [unlimited, setUnlimited] = useState(false);
-  const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
-  // 投擲直後は次のボールを少し遅らせて出す（飛翔が見えるように）
-  const [readyVisible, setReadyVisible] = useState(true);
-  const readyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   // カメラ（ワールドyの表示上端）
   const [cameraY, setCameraY] = useState(0);
   const cameraYRef = useRef(0);
   cameraYRef.current = cameraY;
   const followRef = useRef(true);
   const camStartRef = useRef(0);
+  const gestureStartRef = useRef(0);
 
   // UFO
   const ufoX = useRef(new Animated.Value(0)).current;
@@ -330,15 +327,6 @@ function AddScreen({ entries, onAdd }: Props) {
     setArea({ w: width, h: height });
   }, []);
 
-  useEffect(() => () => {
-    if (readyTimer.current) clearTimeout(readyTimer.current);
-  }, []);
-
-  // スリンガー
-  const onReadyGesture = useCallback((e: PanGestureHandlerGestureEvent) => {
-    setDrag({ x: e.nativeEvent.translationX, y: e.nativeEvent.translationY });
-  }, []);
-
   const doLaunch = useCallback(
     async (spawnX: number, spawnScreenY: number, vx: number, vy: number) => {
       const state = await consumeThrow();
@@ -351,39 +339,23 @@ function AddScreen({ entries, onAdd }: Props) {
       const worldY = cameraYRef.current + spawnScreenY;
       drop(selected, entry.variation, spawnX, worldY, vx, vy);
       followRef.current = true;
-      // 飛翔が見えるよう、次の待機ボールは0.5s後に出す
-      setReadyVisible(false);
-      if (readyTimer.current) clearTimeout(readyTimer.current);
-      readyTimer.current = setTimeout(() => setReadyVisible(true), 500);
     },
     [selected, onAdd, drop]
   );
 
-  const onReadyState = useCallback(
-    (e: PanGestureHandlerStateChangeEvent) => {
-      const { state, translationX, translationY, velocityX, velocityY } = e.nativeEvent;
-      if (state !== State.END && state !== State.CANCELLED && state !== State.FAILED) return;
-      if (state === State.END) {
-        const a = areaRef.current;
-        const sx = clamp(a.w / 2 + translationX, BALL / 2, a.w - BALL / 2);
-        const sy = a.h * READY_FRAC + translationY;
-        const speed = Math.hypot(velocityX, velocityY);
-        if (speed > FLICK_THRESHOLD) {
-          // フリック＝投げる
-          const vx = clamp(velocityX * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
-          const vy = clamp(velocityY * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
-          void doLaunch(sx, sy, vx, vy);
-        } else {
-          // タップ＝その場で自由落下
-          void doLaunch(sx, sy, 0, 0);
-        }
-      }
-      setDrag(null);
+  // タップ＝触れた場所にその場で自由落下（連続タップ対応：1タップ1個）
+  const onTap = useCallback(
+    (e: TapGestureHandlerStateChangeEvent) => {
+      if (e.nativeEvent.state !== State.ACTIVE) return;
+      const a = areaRef.current;
+      const sx = clamp(e.nativeEvent.x, BALL / 2, a.w - BALL / 2);
+      const sy = e.nativeEvent.y;
+      void doLaunch(sx, sy, 0, 0);
     },
     [doLaunch]
   );
 
-  // カメラの手動スクロール
+  // カメラの手動スクロール（パン中はライブで動かす）
   const onCamGesture = useCallback((e: PanGestureHandlerGestureEvent) => {
     const { camMin, camMax } = camBounds();
     const next = clamp(camStartRef.current - e.nativeEvent.translationY, camMin, camMax);
@@ -391,18 +363,36 @@ function AddScreen({ entries, onAdd }: Props) {
     setCameraY(next);
   }, [camBounds]);
 
+  // パン終了：素早いフリック＝投げる（触れ始めた場所から飛ばす）、それ以外＝スクロール。
   const onCamState = useCallback(
     (e: PanGestureHandlerStateChangeEvent) => {
-      const st = e.nativeEvent.state;
-      if (st === State.BEGAN || st === State.ACTIVE) {
+      const { state: st, x, y, translationX, translationY, velocityX, velocityY } = e.nativeEvent;
+      if (st === State.BEGAN) {
         followRef.current = false;
         camStartRef.current = cameraYRef.current;
-      } else if (st === State.END || st === State.CANCELLED || st === State.FAILED) {
+        gestureStartRef.current = Date.now();
+        return;
+      }
+      if (st !== State.END && st !== State.CANCELLED && st !== State.FAILED) return;
+      const speed = Math.hypot(velocityX, velocityY);
+      const dur = Date.now() - gestureStartRef.current;
+      if (st === State.END && speed > FLICK_THRESHOLD && dur < 320) {
+        // フリック＝投げる。スクロール分は戻して、触れ始めた場所から発射。
+        cameraYRef.current = camStartRef.current;
+        setCameraY(camStartRef.current);
+        const a = areaRef.current;
+        const sx = clamp(x - translationX, BALL / 2, a.w - BALL / 2);
+        const sy = y - translationY;
+        const vx = clamp(velocityX * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
+        const vy = clamp(velocityY * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
+        void doLaunch(sx, sy, vx, vy);
+      } else {
+        // スクロール扱い：現在位置を維持。ライブ位置近傍なら追従再開。
         const { liveCam } = camBounds();
         if (cameraYRef.current <= liveCam + 40) followRef.current = true;
       }
     },
-    [camBounds]
+    [camBounds, doLaunch]
   );
 
   const toggleDebug = useCallback(async () => {
@@ -412,10 +402,6 @@ function AddScreen({ entries, onAdd }: Props) {
     const s = await getThrowState();
     setRemaining(s.remaining);
   }, [unlimited]);
-
-  const dragOff = drag ?? { x: 0, y: 0 };
-  const readyScreen = { x: area.w / 2, y: area.h * READY_FRAC };
-  const ballScreen = { x: readyScreen.x + dragOff.x, y: readyScreen.y + dragOff.y };
 
   const ufoTranslate = ufoX.interpolate({
     inputRange: [0, 1],
@@ -445,10 +431,13 @@ function AddScreen({ entries, onAdd }: Props) {
 
       {/* 箱（ヘッダー直下のフル高さ。上に半透明ピッカーを重ねる） */}
       <View style={styles.box} onLayout={onZoneLayout}>
-        {/* 手動スクロール用の背景キャッチャ */}
-        <PanGestureHandler onGestureEvent={onCamGesture} onHandlerStateChange={onCamState}>
-          <View style={StyleSheet.absoluteFill} />
-        </PanGestureHandler>
+        {/* 投擲＆スクロールの入力キャッチャ（全面）。
+            タップ＝触れた場所に自由落下（連続タップ対応） / フリック＝投げる / ドラッグ＝スクロール。 */}
+        <TapGestureHandler onHandlerStateChange={onTap} maxDeltaX={12} maxDeltaY={12}>
+          <PanGestureHandler onGestureEvent={onCamGesture} onHandlerStateChange={onCamState}>
+            <View style={StyleSheet.absoluteFill} />
+          </PanGestureHandler>
+        </TapGestureHandler>
 
         {/* 右側の薄いグラデーション背景（日付ピルを読みやすく） */}
         {area.w > 0 && (
@@ -502,23 +491,12 @@ function AddScreen({ entries, onAdd }: Props) {
         )}
 
         {/* ヒント */}
-        {!drag && readyVisible && (
-          <View style={styles.hint} pointerEvents="none">
-            <Svg width={18} height={12} viewBox="0 0 18 12">
-              <Path d="M3 9 L9 3 L15 9" stroke={text.faint} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-            </Svg>
-            <Text style={styles.hintText}>タップで落とす・フリックで投げる</Text>
-          </View>
-        )}
-
-        {/* 待機ボール（スリンガー）。投擲直後の0.5sは出さない */}
-        {area.w > 0 && readyVisible && (
-          <PanGestureHandler onGestureEvent={onReadyGesture} onHandlerStateChange={onReadyState}>
-            <View style={[styles.ready, { left: ballScreen.x - BALL / 2, top: ballScreen.y - BALL / 2, width: BALL, height: BALL }]}>
-              <EmotionBall emotion={selected} variation={0} size={BALL} shadow />
-            </View>
-          </PanGestureHandler>
-        )}
+        <View style={styles.hint} pointerEvents="none">
+          <Svg width={18} height={12} viewBox="0 0 18 12">
+            <Path d="M3 9 L9 3 L15 9" stroke={text.faint} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          </Svg>
+          <Text style={styles.hintText}>タップで落とす・フリックで投げる</Text>
+        </View>
 
         {/* 感情ピッカー（半透明オーバーレイ。奥を飛ぶ絵文字が透けて見える） */}
         <View style={styles.pickerOverlay} pointerEvents="box-none">
@@ -552,7 +530,6 @@ const styles = StyleSheet.create({
   shootText: { fontSize: 22, fontWeight: '800', color: '#C57B57', letterSpacing: 1 },
   datePill: { position: 'absolute', right: 8, backgroundColor: 'rgba(40,34,26,0.82)', borderRadius: 11, paddingHorizontal: 9, paddingVertical: 3 },
   datePillText: { fontSize: 11, fontWeight: '700', color: '#FBF7EF' },
-  ready: { position: 'absolute' },
   hint: { position: 'absolute', alignSelf: 'center', top: '8%', alignItems: 'center', gap: 4 },
   hintText: { fontSize: 12, color: text.faint, letterSpacing: 1 },
   build: { position: 'absolute', right: 6, bottom: 3, opacity: 0.6 },
