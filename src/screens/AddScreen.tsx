@@ -37,7 +37,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b39 real';
+const BUILD = 'b40 zone';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -150,7 +150,11 @@ function AddScreen({ entries, onAdd }: Props) {
   cameraYRef.current = cameraY;
   const followRef = useRef(true);
   const camStartRef = useRef(0);
-  const gestureStartRef = useRef(0);
+  // パン中の役割（上の空間＝投擲／絵文字層＝スクロール）を開始位置で確定。
+  const panZoneRef = useRef<'throw' | 'scroll' | null>(null);
+  const panMovedRef = useRef(false);
+  // 指先に追従する「持っている」絵文字（投擲ゾーンでドラッグ中のみ）。
+  const [held, setHeld] = useState<{ x: number; y: number } | null>(null);
 
   // UFO
   const ufoX = useRef(new Animated.Value(0)).current;
@@ -343,56 +347,81 @@ function AddScreen({ entries, onAdd }: Props) {
     [selected, onAdd, drop]
   );
 
-  // タップ＝触れた場所にその場で自由落下（連続タップ対応：1タップ1個）
+  // 山の上面（最上端ボール）の画面y。これより上＝空間（投擲）、下＝絵文字層（掴む）。
+  const surfaceScreenY = useCallback(() => restTopRef.current - cameraYRef.current, []);
+
+  // タップ＝触れた場所にその場で自由落下（上の空間のみ／連続タップ対応：1タップ1個）。
   const onTap = useCallback(
     (e: TapGestureHandlerStateChangeEvent) => {
       if (e.nativeEvent.state !== State.ACTIVE) return;
+      const { x, y } = e.nativeEvent;
+      if (y >= surfaceScreenY()) return; // 絵文字層の上をタップ＝何もしない（掴むのはドラッグ）
       const a = areaRef.current;
-      const sx = clamp(e.nativeEvent.x, BALL / 2, a.w - BALL / 2);
-      const sy = e.nativeEvent.y;
-      void doLaunch(sx, sy, 0, 0);
+      void doLaunch(clamp(x, BALL / 2, a.w - BALL / 2), y, 0, 0);
     },
-    [doLaunch]
+    [doLaunch, surfaceScreenY]
   );
 
-  // カメラの手動スクロール（パン中はライブで動かす）
-  const onCamGesture = useCallback((e: PanGestureHandlerGestureEvent) => {
-    const { camMin, camMax } = camBounds();
-    const next = clamp(camStartRef.current - e.nativeEvent.translationY, camMin, camMax);
-    cameraYRef.current = next;
-    setCameraY(next);
-  }, [camBounds]);
+  // パン中：投擲ゾーンなら絵文字を指先に追従、スクロールゾーンならカメラを動かす。
+  const onPanGesture = useCallback(
+    (e: PanGestureHandlerGestureEvent) => {
+      const { x, y, translationY } = e.nativeEvent;
+      if (panZoneRef.current === 'scroll') {
+        const { camMin, camMax } = camBounds();
+        const next = clamp(camStartRef.current - translationY, camMin, camMax);
+        cameraYRef.current = next;
+        setCameraY(next);
+      } else if (panZoneRef.current === 'throw') {
+        panMovedRef.current = true;
+        const a = areaRef.current;
+        setHeld({ x: clamp(x, BALL / 2, a.w - BALL / 2), y });
+      }
+    },
+    [camBounds]
+  );
 
-  // パン終了：素早いフリック＝投げる（触れ始めた場所から飛ばす）、それ以外＝スクロール。
-  const onCamState = useCallback(
+  // パン開始＝開始位置で役割確定。終了＝投擲（フリック/その場落下）orスクロール確定。
+  const onPanState = useCallback(
     (e: PanGestureHandlerStateChangeEvent) => {
-      const { state: st, x, y, translationX, translationY, velocityX, velocityY } = e.nativeEvent;
+      const { state: st, x, y, velocityX, velocityY } = e.nativeEvent;
       if (st === State.BEGAN) {
-        followRef.current = false;
-        camStartRef.current = cameraYRef.current;
-        gestureStartRef.current = Date.now();
+        panMovedRef.current = false;
+        if (y < surfaceScreenY()) {
+          // 上の空間＝投擲ゾーン（カメラは触らない）
+          panZoneRef.current = 'throw';
+        } else {
+          // 絵文字層を掴む＝スクロールゾーン
+          panZoneRef.current = 'scroll';
+          followRef.current = false;
+          camStartRef.current = cameraYRef.current;
+        }
         return;
       }
       if (st !== State.END && st !== State.CANCELLED && st !== State.FAILED) return;
-      const speed = Math.hypot(velocityX, velocityY);
-      const dur = Date.now() - gestureStartRef.current;
-      if (st === State.END && speed > FLICK_THRESHOLD && dur < 320) {
-        // フリック＝投げる。スクロール分は戻して、触れ始めた場所から発射。
-        cameraYRef.current = camStartRef.current;
-        setCameraY(camStartRef.current);
-        const a = areaRef.current;
-        const sx = clamp(x - translationX, BALL / 2, a.w - BALL / 2);
-        const sy = y - translationY;
-        const vx = clamp(velocityX * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
-        const vy = clamp(velocityY * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
-        void doLaunch(sx, sy, vx, vy);
-      } else {
-        // スクロール扱い：現在位置を維持。ライブ位置近傍なら追従再開。
+      const zone = panZoneRef.current;
+      panZoneRef.current = null;
+      if (zone === 'throw') {
+        if (panMovedRef.current && st === State.END) {
+          const a = areaRef.current;
+          const sx = clamp(x, BALL / 2, a.w - BALL / 2);
+          const speed = Math.hypot(velocityX, velocityY);
+          if (speed > FLICK_THRESHOLD) {
+            // フリック＝その方向へ投げる
+            const vx = clamp(velocityX * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
+            const vy = clamp(velocityY * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
+            void doLaunch(sx, y, vx, vy);
+          } else {
+            // ゆっくり離した＝その場に自由落下
+            void doLaunch(sx, y, 0, 0);
+          }
+        }
+        setHeld(null);
+      } else if (zone === 'scroll') {
         const { liveCam } = camBounds();
         if (cameraYRef.current <= liveCam + 40) followRef.current = true;
       }
     },
-    [camBounds, doLaunch]
+    [camBounds, doLaunch, surfaceScreenY]
   );
 
   const toggleDebug = useCallback(async () => {
@@ -431,10 +460,11 @@ function AddScreen({ entries, onAdd }: Props) {
 
       {/* 箱（ヘッダー直下のフル高さ。上に半透明ピッカーを重ねる） */}
       <View style={styles.box} onLayout={onZoneLayout}>
-        {/* 投擲＆スクロールの入力キャッチャ（全面）。
-            タップ＝触れた場所に自由落下（連続タップ対応） / フリック＝投げる / ドラッグ＝スクロール。 */}
+        {/* 入力キャッチャ（全面）。役割は「触れ始めた場所」で切り分け。
+            上の空間＝タップで落下／持って動かすと指先追従→フリックで投げる。
+            絵文字層を掴む＝ドラッグでスクロール（層が持ち上がる）。 */}
         <TapGestureHandler onHandlerStateChange={onTap} maxDeltaX={12} maxDeltaY={12}>
-          <PanGestureHandler onGestureEvent={onCamGesture} onHandlerStateChange={onCamState}>
+          <PanGestureHandler onGestureEvent={onPanGesture} onHandlerStateChange={onPanState}>
             <View style={StyleSheet.absoluteFill} />
           </PanGestureHandler>
         </TapGestureHandler>
@@ -490,12 +520,22 @@ function AddScreen({ entries, onAdd }: Props) {
           </View>
         )}
 
+        {/* 指先に追従する「持っている」絵文字（投擲ゾーンでドラッグ中） */}
+        {held && (
+          <View
+            style={[styles.held, { left: held.x - BALL / 2, top: held.y - BALL / 2, width: BALL, height: BALL }]}
+            pointerEvents="none"
+          >
+            <EmotionBall emotion={selected} variation={0} size={BALL} shadow />
+          </View>
+        )}
+
         {/* ヒント */}
         <View style={styles.hint} pointerEvents="none">
           <Svg width={18} height={12} viewBox="0 0 18 12">
             <Path d="M3 9 L9 3 L15 9" stroke={text.faint} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" />
           </Svg>
-          <Text style={styles.hintText}>タップで落とす・フリックで投げる</Text>
+          <Text style={styles.hintText}>上でタップ/フリック・絵文字層を掴んでスクロール</Text>
         </View>
 
         {/* 感情ピッカー（半透明オーバーレイ。奥を飛ぶ絵文字が透けて見える） */}
@@ -530,6 +570,7 @@ const styles = StyleSheet.create({
   shootText: { fontSize: 22, fontWeight: '800', color: '#C57B57', letterSpacing: 1 },
   datePill: { position: 'absolute', right: 8, backgroundColor: 'rgba(40,34,26,0.82)', borderRadius: 11, paddingHorizontal: 9, paddingVertical: 3 },
   datePillText: { fontSize: 11, fontWeight: '700', color: '#FBF7EF' },
+  held: { position: 'absolute' },
   hint: { position: 'absolute', alignSelf: 'center', top: '8%', alignItems: 'center', gap: 4 },
   hintText: { fontSize: 12, color: text.faint, letterSpacing: 1 },
   build: { position: 'absolute', right: 6, bottom: 3, opacity: 0.6 },
