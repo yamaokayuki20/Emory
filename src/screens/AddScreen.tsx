@@ -13,7 +13,7 @@ import {
   PanGestureHandlerStateChangeEvent,
   State,
 } from 'react-native-gesture-handler';
-import Svg, { Line, Path } from 'react-native-svg';
+import Svg, { Defs, Line, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
 
 import EmotionBall from '../components/EmotionBall';
 import EmotionPicker from '../components/EmotionPicker';
@@ -23,6 +23,7 @@ import TrajectoryLine from '../components/TrajectoryLine';
 import { Ufo } from '../components/targets';
 import BasketHoop, { BASKET_ASPECT, BASKET_HIT } from '../components/targets/BasketHoop';
 import { useBoxPhysics, BoxBall } from '../physics/useBoxPhysics';
+import type { DateBoundary } from '../layout/dateBands';
 import { EmotionEntry } from '../storage/entries';
 import { consumeThrow, getThrowState, isDebugUnlimited, setDebugUnlimited } from '../storage/rateLimit';
 import { bg, text } from '../theme/colors';
@@ -35,7 +36,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b34 basket';
+const BUILD = 'b36 dates';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -100,6 +101,31 @@ function tension(dx: number, dy: number) {
  * カメラ移動は親コンテナの translateY 一括変換で行うため、ここは cameraY に依存しない。
  * → スクロール（カメラ移動）では再描画されず、balls が変わった時だけ再描画される。
  */
+/** 日付バンドの境界（点線ポリライン）＋日付ピルを描画（ワールド座標・memo化）。 */
+const Boundaries = React.memo(function Boundaries({ boundaries, width }: { boundaries: DateBoundary[]; width: number }) {
+  return (
+    <>
+      {boundaries.map((b) => {
+        if (b.points.length < 2) return null;
+        const ys = b.points.map((p) => p.y);
+        const top = Math.min(...ys) - 4;
+        const h = Math.max(...ys) - top + 8;
+        const d = 'M ' + b.points.map((p) => `${p.x.toFixed(1)} ${(p.y - top).toFixed(1)}`).join(' L ');
+        return (
+          <React.Fragment key={b.dateKey}>
+            <Svg width={width} height={h} style={{ position: 'absolute', left: 0, top }} pointerEvents="none">
+              <Path d={d} stroke="rgba(70,58,44,0.8)" strokeWidth={2} strokeDasharray="1.5 7" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </Svg>
+            <View style={[styles.datePill, { top: b.pillY - 11 }]} pointerEvents="none">
+              <Text style={styles.datePillText}>{b.label}</Text>
+            </View>
+          </React.Fragment>
+        );
+      })}
+    </>
+  );
+});
+
 const BallsLayer = React.memo(function BallsLayer({ balls }: { balls: BoxBall[] }) {
   return (
     <>
@@ -149,7 +175,7 @@ function AddScreen({ entries, onAdd }: Props) {
   const [shootMsg, setShootMsg] = useState(false);
   const shootTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const { balls, frozenSorted, frozenVersion, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit, setGoal, consumeGoalHit } =
+  const { balls, frozenSorted, frozenVersion, boundaries, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit, setGoal, consumeGoalHit } =
     useBoxPhysics({ width: area.w, ballSize: BALL });
 
   // 最新値を ref に同期（コールバック/ループ用）
@@ -416,6 +442,19 @@ function AddScreen({ entries, onAdd }: Props) {
           <View style={StyleSheet.absoluteFill} />
         </PanGestureHandler>
 
+        {/* 右側の薄いグラデーション背景（日付ピルを読みやすく） */}
+        {area.w > 0 && (
+          <Svg width={96} height={area.h} style={{ position: 'absolute', right: 0, top: 0 }} pointerEvents="none">
+            <Defs>
+              <LinearGradient id="rg" x1="0" y1="0" x2="1" y2="0">
+                <Stop offset="0" stopColor="#2A221A" stopOpacity={0} />
+                <Stop offset="1" stopColor="#2A221A" stopOpacity={0.14} />
+              </LinearGradient>
+            </Defs>
+            <Rect x={0} y={0} width={96} height={area.h} fill="url(#rg)" />
+          </Svg>
+        )}
+
         {/* カメラはこのコンテナの translateY 一括変換で表現（スクロールは1ノード更新のみ）。
             中のボールはワールド座標固定 → 固定層はカメラ移動で再描画されない。 */}
         <View style={[StyleSheet.absoluteFill, { transform: [{ translateY: -cameraY }] }]} pointerEvents="none">
@@ -423,6 +462,8 @@ function AddScreen({ entries, onAdd }: Props) {
           <BallsLayer balls={frozenVisible} />
           {/* 動的層（飛行中＋上層の眠り・毎フレーム） */}
           <BallsLayer balls={balls} />
+          {/* 日付バンドの境界（点線）＋日付ピル */}
+          {boundaries.length > 0 && <Boundaries boundaries={boundaries} width={area.w} />}
         </View>
 
         {/* 固定バスケットゴール（上部・シュート用） */}
@@ -512,6 +553,8 @@ const styles = StyleSheet.create({
   ufo: { position: 'absolute', left: 0, alignItems: 'center' },
   shoot: { position: 'absolute', alignSelf: 'center', top: '20%' },
   shootText: { fontSize: 22, fontWeight: '800', color: '#C57B57', letterSpacing: 1 },
+  datePill: { position: 'absolute', right: 8, backgroundColor: 'rgba(40,34,26,0.82)', borderRadius: 11, paddingHorizontal: 9, paddingVertical: 3 },
+  datePillText: { fontSize: 11, fontWeight: '700', color: '#FBF7EF' },
   ready: { position: 'absolute' },
   hint: { position: 'absolute', alignSelf: 'center', top: '8%', alignItems: 'center', gap: 4 },
   hintText: { fontSize: 12, color: text.faint, letterSpacing: 1 },
