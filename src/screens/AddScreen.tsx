@@ -33,6 +33,8 @@ interface Props {
 }
 
 const BALL = 46;
+// ビルド識別（キャッシュ判別用。デプロイのたびに更新）
+const BUILD = 'b22 settle';
 
 // スリンガー
 const STRETCH_MAX = 140;
@@ -408,6 +410,11 @@ function AddScreen({ entries, onAdd }: Props) {
         <View style={styles.pickerOverlay} pointerEvents="box-none">
           <EmotionPicker selected={selected} onSelect={setSelected} />
         </View>
+
+        {/* ビルド表示（キャッシュ判別用） */}
+        <View style={styles.build} pointerEvents="none">
+          <Text style={styles.buildText}>{BUILD}</Text>
+        </View>
       </View>
     </View>
   );
@@ -430,6 +437,8 @@ const styles = StyleSheet.create({
   ready: { position: 'absolute' },
   hint: { position: 'absolute', alignSelf: 'center', top: '8%', alignItems: 'center', gap: 4 },
   hintText: { fontSize: 12, color: text.faint, letterSpacing: 1 },
+  build: { position: 'absolute', right: 6, bottom: 3, opacity: 0.6 },
+  buildText: { fontSize: 9, color: text.faint },
 });
 
 export default AddScreen;
