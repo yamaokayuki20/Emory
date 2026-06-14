@@ -9,7 +9,9 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "check:spec": "node scripts/check-spec.ts",
-    "check": "npm run typecheck && npm run check:spec"
+    "check": "npm run typecheck && npm run check:spec",
+    "e2e": "bash e2e/run.sh",
+    "e2e:build": "bash e2e/run.sh --build"
   },
   "dependencies": {
     "@expo/metro-runtime": "~4.0.1",

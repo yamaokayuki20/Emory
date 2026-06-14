@@ -1,0 +1,175 @@
+/*
+ * エモリー 動作テスト「基本パック」（ヘッドレス実機テスト）。
+ *
+ * 何か対応したら必ずこのパックを通すこと（docs/テスト基本パック.md 参照）。
+ * 実画面（react-native-web ビルド）をヘッドレス Chrome で操作し、主要な
+ * インタラクションと例外事象・性能を自動アサートする。1つでも失敗したら exit 1。
+ *
+ * 使い方: node e2e/pack.js <url>   （通常は e2e/run.sh から呼ぶ）
+ * 計測には本番にも入っている軽量フック window.__emoryThrows / __emoryGoals /
+ * __emorySurf(x) を使用（実害なし）。
+ */
+const puppeteer = require('puppeteer');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const URL = process.argv[2] || 'http://localhost:8099/Emory/';
+const results = [];
+let failed = 0;
+function check(name, cond, detail) {
+  results.push({ name, pass: !!cond, detail });
+  if (!cond) failed++;
+}
+
+async function newPage(browser, forceBasket, errors) {
+  const page = await browser.newPage();
+  page.on('pageerror', (e) => errors.push('PAGEERROR ' + e.message));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push('CONSOLE ' + m.text()); });
+  await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2 });
+  await page.evaluateOnNewDocument((fb) => {
+    try { localStorage.setItem('emory.debugUnlimited', '1'); } catch (e) {}
+    Math.random = () => (fb ? 0.99 : 0.01);
+  }, forceBasket);
+  await page.goto(URL, { waitUntil: 'networkidle0', timeout: 60000 });
+  await sleep(3200);
+  return page;
+}
+const throws = (p) => p.evaluate(() => window.__emoryThrows || 0);
+const goals = (p) => p.evaluate(() => window.__emoryGoals || 0);
+// 山が完全に静止するまで待つ（surf が一定値で連続安定＝カメラ追従も settle 完了）。
+// 落下中はテスト計測と実タップで surf がズレるため、必ず静止させてから層判定を行う。
+async function waitSettled(p, timeoutMs = 9000) {
+  const x = 195; let prev = null, stable = 0; const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    const s = await p.evaluate((xx) => { const f = window.__emorySurf; return f ? Math.round(f(xx)) : -1; }, x);
+    if (s === prev) { if (++stable >= 4) return true; } else { stable = 0; prev = s; }
+    await sleep(160);
+  }
+  return false;
+}
+// surf より少し上（=確実に投擲ゾーン）かつピッカー下端より下の y を返す
+const aboveSurf = (p, x) => p.evaluate((xx) => {
+  const s = window.__emorySurf; const surf = s ? s(xx) : 400;
+  return Math.max(180, Math.min(surf - 24, 740));
+}, x);
+
+(async () => {
+  const errors = [];
+  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'] });
+
+  // ===== UFO モードのページで一般インタラクション =====
+  const page = await newPage(browser, false, errors);
+  const buildTag = await page.evaluate(() => {
+    const t = [...document.querySelectorAll('*')].map((e) => e.textContent).find((s) => /^b\d+ /.test(s || ''));
+    return t || '(none)';
+  });
+
+  // T1 上の空間タップ → 1タップ1生成
+  let b0 = await throws(page);
+  for (const x of [120, 200, 280]) { await page.touchscreen.tap(x, await aboveSurf(page, x)); await sleep(160); }
+  await sleep(2200);
+  check('T1 emptyTap 1:1', (await throws(page)) - b0 === 3, `delta=${(await throws(page)) - b0}`);
+
+  // T2 連続タップ（45ms）→ 全て生成
+  b0 = await throws(page);
+  for (let i = 0; i < 8; i++) { const x = 110 + i * 24; await page.touchscreen.tap(x, await aboveSurf(page, x)); await sleep(45); }
+  await sleep(2200);
+  check('T2 rapidTap 8/8', (await throws(page)) - b0 === 8, `delta=${(await throws(page)) - b0}`);
+
+  // T3 絵文字層タップ → 生成されない（不変条件: タップ時に局所表面より下の点は生成0）。
+  // 完全静止させてから、各タップ直前に live surf で「層内」を再確認した点だけを検証する。
+  await waitSettled(page);
+  // 「明確に層の内部（局所表面より十分深い）」点だけを狙う＝settle のゆらぎに左右されない。
+  let t3tested = 0, t3viol = 0;
+  const t3bad = [];
+  const cands = await page.evaluate(() => {
+    const out = [];
+    for (const img of document.querySelectorAll('img')) {
+      const r = img.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      if (r.width >= 20 && r.width <= 70 && cy > window.innerHeight * 0.5 && cy < window.innerHeight - 20) out.push([Math.round(cx), Math.round(cy)]);
+    }
+    return out;
+  });
+  for (const [x, y] of cands) {
+    const margin = await page.evaluate((xx, yy) => { const s = window.__emorySurf; return s ? yy - s(xx) : -1; }, x, y);
+    if (margin < 70) continue; // 表面付近は対象外（明確に層内のものだけ検証）
+    const before = await throws(page);
+    await page.touchscreen.tap(x, y);
+    await sleep(120);
+    t3tested++;
+    if ((await throws(page)) > before) { t3viol++; t3bad.push({ x, y, margin: Math.round(margin) }); }
+    if (t3tested >= 12) break;
+  }
+  check('T3 layerTap invariant (層内タップ→生成0)', t3viol === 0, `tested=${t3tested} violations=${t3viol} ${JSON.stringify(t3bad)}`);
+
+  // T4 フリック → 投擲（+1）
+  b0 = await throws(page);
+  { const y0 = await aboveSurf(page, 150); await page.mouse.move(150, Math.min(y0, 250)); await page.mouse.down();
+    for (const [x, y] of [[200, 220], [250, 195], [300, 175], [330, 165]]) { await page.mouse.move(x, y); await sleep(8); }
+    await page.mouse.up(); }
+  await sleep(2200);
+  check('T4 flick +1', (await throws(page)) - b0 === 1, `delta=${(await throws(page)) - b0}`);
+
+  // T5 層を掴んでドラッグ → スクロール（生成されない）
+  b0 = await throws(page);
+  { const gy = await page.evaluate(() => { const s = window.__emorySurf; return Math.round((s ? s(195) : 400) + 60); });
+    await page.mouse.move(195, gy); await page.mouse.down();
+    for (let i = 1; i <= 8; i++) { await page.mouse.move(195, gy + i * 16); await sleep(35); }
+    await page.mouse.up(); }
+  await sleep(700);
+  check('T5 scrollGrab 0', (await throws(page)) - b0 === 0, `delta=${(await throws(page)) - b0}`);
+
+  // T6 演出切替ボタンが機能
+  const btn = await page.evaluate(() => {
+    const el = [...document.querySelectorAll('*')].find((e) => /演出:/.test(e.textContent || '') && e.children.length <= 2);
+    if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  });
+  check('T6 toggle button exists', !!btn, btn ? 'found' : 'missing');
+
+  // T7 すり抜け: 画面下端を大きく超えて残留するボールが無い
+  const strays = await page.evaluate(() => { let n = 0; for (const i of document.querySelectorAll('img')) { if (i.getBoundingClientRect().top > window.innerHeight + 200) n++; } return n; });
+  check('T7 no stray below screen', strays === 0, `strays=${strays}`);
+
+  // T8 性能（4xスロットルで30投、中央値fps>=40）
+  const client = await page.target().createCDPSession();
+  await client.send('Emulation.setCPUThrottlingRate', { rate: 4 });
+  await page.evaluate(() => { window.__frames = []; let last = performance.now(); const t = (n) => { window.__frames.push(n - last); last = n; if (window.__sampling) requestAnimationFrame(t); }; window.__sampling = true; requestAnimationFrame(t); });
+  for (let i = 0; i < 30; i++) { const x = 90 + (i % 8) * 28; await page.touchscreen.tap(x, await aboveSurf(page, x)); await sleep(110); }
+  await sleep(1500);
+  const perf = await page.evaluate(() => { window.__sampling = false; const f = window.__frames.filter((d) => d > 0 && d < 1000).sort((a, b) => a - b); const med = f[Math.floor(f.length * 0.5)] || 0; return { medFps: Math.round(1000 / med), samples: f.length }; });
+  await client.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  check('T8 perf median fps>=40', perf.medFps >= 40, `medFps=${perf.medFps}`);
+  await page.close();
+
+  // ===== バスケモードのページでスコア判定 =====
+  const bp = await newPage(browser, true, errors);
+  const hoop = await bp.evaluate(() => { let best = null; for (const i of document.querySelectorAll('img')) { const r = i.getBoundingClientRect(); if (r.width > 70) best = r; } return best ? { left: best.left, top: best.top, w: best.width, h: best.height } : null; });
+  check('T9 basket renders', !!hoop, hoop ? `w=${Math.round(hoop.w)}` : 'missing');
+  if (hoop) {
+    const cx = Math.round(hoop.left + 0.30 * hoop.w);
+    const ringY = Math.round(hoop.top + 0.32 * hoop.h);
+    const r = Math.round(0.32 * hoop.w);
+    // 中央の真上 → 自由落下で中央通過 → ゴール
+    let g0 = await goals(bp);
+    for (let i = 0; i < 5; i++) { await bp.touchscreen.tap(cx, Math.max(180, ringY - 55)); await sleep(900); }
+    await sleep(700);
+    check('T10 basket center scores', (await goals(bp)) - g0 >= 1, `goals=${(await goals(bp)) - g0}`);
+    // リムの真上 → バウンド → ゴールしない
+    g0 = await goals(bp);
+    for (let i = 0; i < 5; i++) { await bp.touchscreen.tap(cx + r, Math.max(180, ringY - 55)); await sleep(900); }
+    await sleep(700);
+    check('T11 basket rim no score', (await goals(bp)) - g0 === 0, `goals=${(await goals(bp)) - g0}`);
+  }
+  await bp.close();
+
+  check('T12 no console/page errors', errors.length === 0, errors.slice(0, 4).join(' | '));
+
+  await browser.close();
+
+  console.log('\n=== エモリー 基本テストパック ===');
+  console.log('buildTag:', buildTag);
+  for (const r of results) console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? '  (' + r.detail + ')' : ''}`);
+  console.log(`\n${failed === 0 ? 'ALL PASS' : failed + ' FAILED'}  (${results.length} checks)`);
+  console.log('PACK_DONE');
+  process.exit(failed === 0 ? 0 : 1);
+})().catch((e) => { console.error('PACK_ERROR', e); process.exit(2); });

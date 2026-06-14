@@ -401,15 +401,29 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     return h;
   }, []);
 
-  // ワールドx の局所表面ワールドy。列にボールが無ければ底（GROUND_Y）。
+  // ワールドx の局所表面ワールドy。
+  // 空き列（その列にボールが無い）は左右の有効な列から推定（隙間・端でも山の表面を
+  // 連続的に扱う）。山全体が空のときだけ底（GROUND_Y）。
+  //  → 「層の隙間や端の低い所をタップしても生成しない」を担保する。
   const surfaceYAt = useCallback((x: number) => {
     const c = colTopRef.current;
     if (!c || c.tops.length === 0) return GROUND_Y;
+    const n = c.tops.length;
     let ci = Math.floor(x / c.colW);
     if (ci < 0) ci = 0;
-    else if (ci >= c.tops.length) ci = c.tops.length - 1;
-    const t = c.tops[ci];
-    return isFinite(t) ? t : GROUND_Y;
+    else if (ci >= n) ci = n - 1;
+    if (isFinite(c.tops[ci])) return c.tops[ci];
+    // 空き列：左右の最も近い有効列を探して補間／端は外挿。
+    let l = ci - 1;
+    while (l >= 0 && !isFinite(c.tops[l])) l--;
+    let r = ci + 1;
+    while (r < n && !isFinite(c.tops[r])) r++;
+    const lv = l >= 0 ? c.tops[l] : NaN;
+    const rv = r < n ? c.tops[r] : NaN;
+    if (isNaN(lv) && isNaN(rv)) return GROUND_Y; // 完全に空
+    if (isNaN(lv)) return rv;
+    if (isNaN(rv)) return lv;
+    return lv + (rv - lv) * ((ci - l) / (r - l)); // 線形補間
   }, []);
 
   return {
