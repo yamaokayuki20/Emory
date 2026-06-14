@@ -21,7 +21,7 @@ import Fireworks from '../components/Fireworks';
 import Header from '../components/Header';
 import TrajectoryLine from '../components/TrajectoryLine';
 import { BasketHoop, Ufo, targetForToday } from '../components/targets';
-import { useBoxPhysics } from '../physics/useBoxPhysics';
+import { useBoxPhysics, BoxBall } from '../physics/useBoxPhysics';
 import { EmotionEntry } from '../storage/entries';
 import { consumeThrow, getThrowState, isDebugUnlimited, setDebugUnlimited } from '../storage/rateLimit';
 import { bg, text } from '../theme/colors';
@@ -34,7 +34,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b24 settle';
+const BUILD = 'b25 perf';
 
 // スリンガー
 const STRETCH_MAX = 140;
@@ -45,11 +45,10 @@ const VEL_MAX = 16;
 // 画面内のレイアウト割合（箱はヘッダー直下のフル高さ。上部にピッカーを半透明オーバーレイ）
 const UFO_FRAC = 0.18; // UFOの表示y（ピッカーの下）
 const READY_FRAC = 0.42; // 待機ボールの表示y
-// 山は基本動かさない。上端がこの帯[TOP..BOTTOM]の外に出たら、TARGET位置へ戻す。
-// （積み上がりすぎ＝上に出る／落ち切って画面外＝下に出る、の両方を補正）
-const TOP_LIMIT_FRAC = 0.34;
-const BOTTOM_LIMIT_FRAC = 0.72;
-const TARGET_FRAC = 0.5;
+// 山は基本固定。積み上がって上端がこの線より高くなった時だけ、ゆっくり「下げる」。
+// 自動で上げる（せり上がる）挙動はしない。
+const TOP_LIMIT_FRAC = 0.3; // 上端がこれより上に来たら下げ補正発動
+const TARGET_FRAC = 0.44; // 下げ先（上端をこの位置へ）
 
 const UFO_SIZE = 58;
 const UFO_OFF = 70;
@@ -66,6 +65,40 @@ function tension(dx: number, dy: number) {
   const t = STRETCH_MAX * (1 - Math.exp(-mag / STRETCH_K));
   return { x: (dx / mag) * t, y: (dy / mag) * t, mag: t };
 }
+
+/** ボール群を画面外カリングして描画する層。props が変わった時だけ再描画（memo）。 */
+const BallsLayer = React.memo(function BallsLayer({
+  balls,
+  cameraY,
+  height,
+}: {
+  balls: BoxBall[];
+  cameraY: number;
+  height: number;
+}) {
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      {balls.map((b) => {
+        const sy = b.y - cameraY;
+        if (sy < -BALL || sy > height + BALL) return null; // 画面外は描かない
+        return (
+          <EmotionBall
+            key={b.bodyId}
+            emotion={b.emotion}
+            variation={b.variation}
+            size={b.size}
+            style={{
+              position: 'absolute',
+              left: b.x - b.size / 2,
+              top: sy - b.size / 2,
+              transform: [{ rotate: `${b.angle}rad` }],
+            }}
+          />
+        );
+      })}
+    </View>
+  );
+});
 
 function AddScreen({ entries, onAdd }: Props) {
   const [area, setArea] = useState({ w: 0, h: 0 });
@@ -93,7 +126,7 @@ function AddScreen({ entries, onAdd }: Props) {
 
   const target = useMemo(() => targetForToday(), []);
 
-  const { balls, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit } = useBoxPhysics({
+  const { balls, frozenBalls, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit } = useBoxPhysics({
     width: area.w,
     ballSize: BALL,
   });
@@ -139,8 +172,8 @@ function AddScreen({ entries, onAdd }: Props) {
     }
   }, [restTopY, area.h, groundY]);
 
-  // カメラの帯補正：山の上端が帯[TOP..BOTTOM]の外に出たら TARGET へ戻す（ヒステリシス）。
-  // 上に出る＝積み上がりすぎ、下に出る＝落ち切って画面外、の両方を補正＝常に画面内に収める。
+  // カメラ補正：山が積み上がって上端が TOP_LIMIT より高くなった時だけ、ゆっくり「下げる」。
+  // 自動で上げる（せり上がる）挙動はしない＝下げる一方向のみ（cameraY は減るだけ）。
   const correctingRef = useRef(false);
   useEffect(() => {
     let on = true;
@@ -151,19 +184,22 @@ function AddScreen({ entries, onAdd }: Props) {
         const a = areaRef.current;
         if (a.h > 0) {
           const restScreenY = restTopRef.current - cameraYRef.current;
-          if (restScreenY < a.h * TOP_LIMIT_FRAC || restScreenY > a.h * BOTTOM_LIMIT_FRAC) {
-            correctingRef.current = true;
-          }
+          if (restScreenY < a.h * TOP_LIMIT_FRAC) correctingRef.current = true;
           if (correctingRef.current) {
-            const tgt = restTopRef.current - a.h * TARGET_FRAC;
-            setCameraY((prev) => {
-              const next = prev + (tgt - prev) * 0.12;
-              if (Math.abs(next - prev) < 0.4) {
-                correctingRef.current = false;
-                return tgt;
-              }
-              return next;
-            });
+            const tgt = restTopRef.current - a.h * TARGET_FRAC; // 下げ先
+            // 下げる方向（cameraY を減らす）だけ。上げ方向にはしない。
+            if (tgt >= cameraYRef.current - 0.4) {
+              correctingRef.current = false;
+            } else {
+              setCameraY((prev) => {
+                const next = prev + (tgt - prev) * 0.06; // ゆっくり
+                if (Math.abs(next - prev) < 0.4) {
+                  correctingRef.current = false;
+                  return tgt;
+                }
+                return next;
+              });
+            }
           }
         }
       }
@@ -324,16 +360,6 @@ function AddScreen({ entries, onAdd }: Props) {
     outputRange: [-UFO_OFF - UFO_SIZE / 2, area.w + UFO_OFF - UFO_SIZE / 2],
   });
 
-  // 画面外カリング
-  const visible = useMemo(() => {
-    const cy = cameraY;
-    const h = area.h;
-    return balls.filter((b) => {
-      const sy = b.y - cy;
-      return sy > -BALL && sy < h + BALL;
-    });
-  }, [balls, cameraY, area.h]);
-
   return (
     <View style={styles.screen}>
       <Header remaining={remaining} debugUnlimited={unlimited} onToggleDebug={toggleDebug} />
@@ -345,23 +371,10 @@ function AddScreen({ entries, onAdd }: Props) {
           <View style={StyleSheet.absoluteFill} />
         </PanGestureHandler>
 
-        {/* ボール（カリング済み・操作は透過） */}
-        <View style={StyleSheet.absoluteFill} pointerEvents="none">
-          {visible.map((b) => (
-            <EmotionBall
-              key={b.bodyId}
-              emotion={b.emotion}
-              variation={b.variation}
-              size={b.size}
-              style={{
-                position: 'absolute',
-                left: b.x - b.size / 2,
-                top: b.y - cameraY - b.size / 2,
-                transform: [{ rotate: `${b.angle}rad` }],
-              }}
-            />
-          ))}
-        </View>
+        {/* 固定層（位置不変・memo化。固定追加かカメラ移動時だけ再描画） */}
+        <BallsLayer balls={frozenBalls} cameraY={cameraY} height={area.h} />
+        {/* 動的層（飛行中＋上層の眠り・毎フレーム） */}
+        <BallsLayer balls={balls} cameraY={cameraY} height={area.h} />
 
         {/* UFO */}
         {area.w > 0 && ufoVisible && (
