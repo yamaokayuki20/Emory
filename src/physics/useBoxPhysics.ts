@@ -3,7 +3,7 @@ import Matter from 'matter-js';
 
 import { EmotionEntry } from '../storage/entries';
 import { EmotionKey } from '../theme/emotions';
-import { computeSeedLayout } from '../layout/seedLayout';
+import { computeSettledPile } from '../layout/settlePile';
 
 export interface BoxBall {
   bodyId: number;
@@ -156,7 +156,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       if (!engine) return;
       // 当たり半径を見た目のボール（径の約0.84＝半径0.42）に合わせ、
       // slop を小さくして「絶対に重ならない」。固定はしない（動的＝衝撃に反応）。
-      const body = Matter.Bodies.circle(x, y, ballSize * 0.42, {
+      const body = Matter.Bodies.circle(x, y, ballSize * 0.45, {
         restitution: 0.32, // 軽く弾む（高すぎると不安定なので控えめ）
         friction: 0.55,
         frictionStatic: 0.8,
@@ -183,8 +183,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     (entries: EmotionEntry[]) => {
       if (seededRef.current || !engineRef.current || width <= 0) return;
       seededRef.current = true;
-      // ランダムに積み上がった配置（純粋関数。デグレ監視は scripts/check-spec.ts）。
-      const { placements, topY } = computeSeedLayout(entries, {
+      // 重力で settle 済みの最終位置（純粋関数。デグレ監視は scripts/check-spec.ts）。
+      const { placements, topY } = computeSettledPile(entries, {
         width,
         ballSize,
         groundY: GROUND_Y,
