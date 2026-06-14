@@ -34,13 +34,35 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b25 perf';
+const BUILD = 'b28 cap';
+
+// 固定層の可視判定マージン
+const CULL_MARGIN = BALL * 2;
+
+/** y昇順配列から [top, bottom] のワールドy帯に入る連続スライスを返す（二分探索, O(log F + visible)）。 */
+function visibleSlice(sorted: BoxBall[], top: number, bottom: number): BoxBall[] {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid].y < top) lo = mid + 1;
+    else hi = mid;
+  }
+  const start = lo;
+  hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid].y <= bottom) lo = mid + 1;
+    else hi = mid;
+  }
+  return sorted.slice(start, lo);
+}
 
 // スリンガー
 const STRETCH_MAX = 140;
 const STRETCH_K = 78;
 const STRETCH_TO_VEL = 0.14; // ×1.5
-const VEL_MAX = 16;
+const VEL_MAX = 11;
 
 // 画面内のレイアウト割合（箱はヘッダー直下のフル高さ。上部にピッカーを半透明オーバーレイ）
 const UFO_FRAC = 0.18; // UFOの表示y（ピッカーの下）
@@ -126,10 +148,8 @@ function AddScreen({ entries, onAdd }: Props) {
 
   const target = useMemo(() => targetForToday(), []);
 
-  const { balls, frozenBalls, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit } = useBoxPhysics({
-    width: area.w,
-    ballSize: BALL,
-  });
+  const { balls, frozenSorted, frozenVersion, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit } =
+    useBoxPhysics({ width: area.w, ballSize: BALL });
 
   // 最新値を ref に同期（コールバック/ループ用）
   const areaRef = useRef(area);
@@ -360,6 +380,17 @@ function AddScreen({ entries, onAdd }: Props) {
     outputRange: [-UFO_OFF - UFO_SIZE / 2, area.w + UFO_OFF - UFO_SIZE / 2],
   });
 
+  // 固定層は「画面内のスライス」だけ描画。カメラは20pxバケットに量子化して再計算を抑える。
+  const CAM_BUCKET = 20;
+  const camBucket = Math.round(cameraY / CAM_BUCKET);
+  const frozenVisible = useMemo(() => {
+    if (area.h <= 0 || frozenSorted.length === 0) return frozenSorted;
+    const camTop = camBucket * CAM_BUCKET;
+    return visibleSlice(frozenSorted, camTop - CULL_MARGIN, camTop + area.h + CULL_MARGIN);
+    // frozenSorted は参照不変。変化は frozenVersion で検知する。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frozenVersion, camBucket, area.h]);
+
   return (
     <View style={styles.screen}>
       <Header remaining={remaining} debugUnlimited={unlimited} onToggleDebug={toggleDebug} />
@@ -372,7 +403,7 @@ function AddScreen({ entries, onAdd }: Props) {
         </PanGestureHandler>
 
         {/* 固定層（位置不変・memo化。固定追加かカメラ移動時だけ再描画） */}
-        <BallsLayer balls={frozenBalls} cameraY={cameraY} height={area.h} />
+        <BallsLayer balls={frozenVisible} cameraY={cameraY} height={area.h} />
         {/* 動的層（飛行中＋上層の眠り・毎フレーム） */}
         <BallsLayer balls={balls} cameraY={cameraY} height={area.h} />
 

@@ -30,8 +30,9 @@ interface Options {
 interface BoxApi {
   /** 動的（飛行中＋上層の眠り）ボール。毎フレーム更新。 */
   balls: BoxBall[];
-  /** 固定済み（静的）ボール。位置不変。固定が増えた時だけ更新。 */
-  frozenBalls: BoxBall[];
+  /** 固定済み（静的）ボール。y昇順・位置不変。参照は安定、変化は frozenVersion で通知。 */
+  frozenSorted: BoxBall[];
+  frozenVersion: number;
   restTopY: number; // 着地済みの山の最上端（飛行中は無視）
   activeCount: number; // 動いているボール数
   groundY: number;
@@ -44,11 +45,25 @@ interface BoxApi {
 const WALL = 80;
 const GROUND_Y = 40000; // 箱の底（ワールド）。山はここから上へ積み上がる。
 // 山頂からこの深さ（径の倍数）までを「動的に反応する上層」とし、それより下の
-// 眠りボールは静的に固定する（負荷軽減・崩れ防止）。
-const ACTIVE_DEPTH_ROWS = 6;
+// 眠りボールは静的に固定する（負荷軽減・崩れ防止）。固定層を表面に近づける。
+const ACTIVE_DEPTH_ROWS = 4;
 // 固定からさらにこの深さより下のボールは物理ワールドから除去（描画だけ残す）。
-// → 物理に残るボディ数を「上層＋固定の床帯」だけに抑え、総数に依存させない。
-const REMOVE_EXTRA_ROWS = 6;
+// 浅め＝物理に残るボディを「上層＋薄い床帯」だけに束ね、総数に依存させない（性能の要）。
+const REMOVE_EXTRA_ROWS = 2;
+// 当たり判定＝見た目の径＋1px（重ならないための最小間隔）。
+const GAP_PX = 1;
+
+/** y昇順を保ったまま挿入（二分探索）。固定ボールは位置不変なので順序も不変。 */
+function insertSortedByY(arr: BoxBall[], b: BoxBall) {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid].y < b.y) lo = mid + 1;
+    else hi = mid;
+  }
+  arr.splice(lo, 0, b);
+}
 
 /** b が（見た目の径で）他のボールと重なっているか。重なり固定の防止に使う。 */
 function overlapsNeighbor(
@@ -75,11 +90,12 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   const hitRef = useRef<{ x: number; y: number } | null>(null);
   const rafRef = useRef<number | null>(null);
   const seededRef = useRef(false);
-  // 固定済み（静的・除去済み含む）ボールの描画データ。位置不変。
+  // 固定済み（静的・除去済み含む）ボールの描画データ。位置不変・y昇順。
   const frozenMapRef = useRef<Map<number, BoxBall>>(new Map());
+  const frozenSortedRef = useRef<BoxBall[]>([]);
 
   const [balls, setBalls] = useState<BoxBall[]>([]);
-  const [frozenBalls, setFrozenBalls] = useState<BoxBall[]>([]);
+  const [frozenVersion, setFrozenVersion] = useState(0);
   const restTopRef = useRef(GROUND_Y);
   const [meta, setMeta] = useState({ restTopY: GROUND_Y, activeCount: 0 });
 
@@ -89,8 +105,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     engine.enableSleeping = true;
     engine.gravity.y = 1.0;
     // 衝突解決を強めて、強い衝突でも食い込み（重なり）を残さない
-    engine.positionIterations = 14;
-    engine.velocityIterations = 10;
+    engine.positionIterations = 20;
+    engine.velocityIterations = 12;
     engineRef.current = engine;
 
     const ground = Matter.Bodies.rectangle(width / 2, GROUND_Y + 40, width + WALL * 2, 80, { isStatic: true });
@@ -109,13 +125,42 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       last = now;
       Matter.Engine.update(engine, delta);
 
+      // デペネトレーション: 接触ペアが「見た目の径+1px」より近ければ直接押し離す。
+      // matter の接触情報(engine.pairs)だけを使うので軽量。動的ボールの重なりを能動解消。
+      const minSep = ballSize * 0.84 + GAP_PX;
+      const pairs = engine.pairs.list;
+      for (let pi = 0; pi < pairs.length; pi++) {
+        const pair = pairs[pi];
+        if (!pair.isActive) continue;
+        const a = pair.bodyA;
+        const b = pair.bodyB;
+        if (!metaRef.current.has(a.id) || !metaRef.current.has(b.id)) continue; // 壁/地面は除外
+        let dx = b.position.x - a.position.x;
+        let dy = b.position.y - a.position.y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+        const overlap = minSep - dist;
+        if (overlap <= 0) continue;
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const push = overlap * 0.6; // ゆるく（数フレームで解消）
+        if (!a.isStatic && !b.isStatic) {
+          Matter.Body.translate(a, { x: -nx * push * 0.5, y: -ny * push * 0.5 });
+          Matter.Body.translate(b, { x: nx * push * 0.5, y: ny * push * 0.5 });
+        } else if (!a.isStatic) {
+          Matter.Body.translate(a, { x: -nx * push, y: -ny * push });
+        } else if (!b.isStatic) {
+          Matter.Body.translate(b, { x: nx * push, y: ny * push });
+        }
+      }
+
       const tgt = targetRef.current;
       let activeCount = 0;
       let settledTop = Infinity;
       const freezeLine = restTopRef.current + ballSize * ACTIVE_DEPTH_ROWS;
       const removeLine = restTopRef.current + ballSize * (ACTIVE_DEPTH_ROWS + REMOVE_EXTRA_ROWS);
       const allBodies = Matter.Composite.allBodies(engine.world);
-      const overlapDist2 = (ballSize * 0.84 * 0.98) ** 2;
+      // 固定は「見た目の径+1px」以上離れている時だけ（重なり中は固定しない）
+      const overlapDist2 = (ballSize * 0.84 + GAP_PX) ** 2;
       const dynamicRender: BoxBall[] = [];
       const toRemove: Matter.Body[] = [];
       let frozenChanged = false;
@@ -138,7 +183,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
           if (b.position.y > freezeLine) {
             if (!overlapsNeighbor(b, allBodies, metaRef.current, overlapDist2)) {
               Matter.Body.setStatic(b, true);
-              frozenMapRef.current.set(b.id, {
+              const fb: BoxBall = {
                 bodyId: b.id,
                 emotion: m.emotion,
                 variation: m.variation,
@@ -146,7 +191,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
                 y: b.position.y,
                 angle: b.angle,
                 size: m.size,
-              });
+              };
+              frozenMapRef.current.set(b.id, fb);
+              insertSortedByY(frozenSortedRef.current, fb); // y昇順を維持
               frozenChanged = true;
               continue; // 固定したので動的層には入れない
             } else {
@@ -184,7 +231,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
       if (settledTop !== Infinity) restTopRef.current = settledTop;
 
-      if (frozenChanged) setFrozenBalls(Array.from(frozenMapRef.current.values()));
+      // 配列再確保なし。版だけ進めて変化を通知（消費側は frozenVersion を依存に）。
+      if (frozenChanged) setFrozenVersion((v) => v + 1);
 
       // 動的が居る間だけ動的層を更新（アイドル時は再描画しない）
       if (activeCount > 0 || prevActive !== 0) {
@@ -204,6 +252,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       engineRef.current = null;
       metaRef.current.clear();
       frozenMapRef.current.clear();
+      frozenSortedRef.current = [];
     };
   }, [width]);
 
@@ -261,7 +310,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
   return {
     balls,
-    frozenBalls,
+    frozenSorted: frozenSortedRef.current,
+    frozenVersion,
     restTopY: meta.restTopY,
     activeCount: meta.activeCount,
     groundY: GROUND_Y,
