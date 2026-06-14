@@ -144,8 +144,13 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     // 必ずどこかのボールに接触して表面に積まれる。投擲は上向き/横向きなので、
     // 上向き速度は制限せず（＝バスケへ届く飛距離を保つ）、落下と横方向だけ抑える。
     // matter の velocity は「1ステップの移動量(px)」。これがボール径に近いと、CCD非対応の
-    // matter では積層の隙間を飛び越えて貫通する。1ステップ移動量を径の〜1/6に制限すると、
-    // 必ずどこかのボールに接触して表面に積まれる（実測で貫通0）。
+    // matter では積層の隙間を飛び越えて貫通する。貫通は「積層へ突っ込む＝下降中」に起きる。
+    // そこで【下降中(vy>0)は“総”速度をボール径の〜1/6に制限】（斜め進入の貫通も防ぐ）、
+    // 【上昇/水平＝投擲は勢いを残す】。投擲は上昇で遠くへ飛び、落下は遅いので必ず積まれる。
+    // 固定タイムステップで correction≈1 のため、この制限がそのまま1ステップ移動量になる。
+    // matter は CCD 非対応のため、1ステップ移動量(velocity)がボール径に近いと積層の隙間を
+    // 飛び越えて貫通する。総移動量をボール径の〜1/5に制限すると、必ずどこかに接触して
+    // 表面に積まれる（実測で安定して貫通0）。投擲はこの上限内で勢いを付ける。
     const VMAX = ballSize * 0.16; // ≈7.4px/step
     const VMAX2 = VMAX * VMAX;
     // 固定タイムステップ。matter は correction=delta/lastDelta で前回比に速度を伸縮させる
@@ -160,8 +165,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         const v = b.velocity;
         const s2 = v.x * v.x + v.y * v.y;
         if (s2 > VMAX2) {
-          const sp = Math.sqrt(s2);
-          Matter.Body.setVelocity(b, { x: (v.x / sp) * VMAX, y: (v.y / sp) * VMAX });
+          const s = Math.sqrt(s2);
+          Matter.Body.setVelocity(b, { x: (v.x / s) * VMAX, y: (v.y / s) * VMAX });
         }
       }
       Matter.Engine.update(engine, FIXED_DELTA);
@@ -198,10 +203,12 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       // 縁に当たればバウンド・中央を上から抜けた時だけスコア（下記）。
       const goalNow = goalRef.current;
       if (goalNow) {
-        const rimR = ballSize * 0.08;
+        const rimR = ballSize * 0.07;
+        // 摩擦0＝ツルツルのリム。縁に乗ってもすぐ滑り落ちる（リング上に固定されない／#5）。
         if (!rimARef.current || !rimBRef.current) {
-          rimARef.current = Matter.Bodies.circle(goalNow.x - goalNow.r, goalNow.y, rimR, { isStatic: true, restitution: 0.5, friction: 0.2 });
-          rimBRef.current = Matter.Bodies.circle(goalNow.x + goalNow.r, goalNow.y, rimR, { isStatic: true, restitution: 0.5, friction: 0.2 });
+          const opt = { isStatic: true, restitution: 0.3, friction: 0, frictionStatic: 0 };
+          rimARef.current = Matter.Bodies.circle(goalNow.x - goalNow.r, goalNow.y, rimR, opt);
+          rimBRef.current = Matter.Bodies.circle(goalNow.x + goalNow.r, goalNow.y, rimR, opt);
           Matter.Composite.add(engine.world, [rimARef.current, rimBRef.current]);
         } else {
           Matter.Body.setPosition(rimARef.current, { x: goalNow.x - goalNow.r, y: goalNow.y });
@@ -218,8 +225,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       let activeCount = 0;
       let settledTop = Infinity;
       const allBodies = Matter.Composite.allBodies(engine.world);
-      // 固定は「見た目で重なっていない（中心間が見た目の径以上）」時だけ。
-      // 体半径(0.44)は見た目(0.42)より大きいので、わずかな食い込みは見た目重なりにならない。
+      // 固定は「見た目で重なっていない（中心間が見た目の径以上）」時だけ＝固定層を綺麗に保つ。
       const overlapDist2 = (ballSize * 0.84) ** 2;
 
       // ── 列ごとの「表面の高さ」を求める（パス1）。
@@ -281,7 +287,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
         if (b.isSleeping) {
           if (top < settledTop) settledTop = top;
-          // 局所表面より深い眠りボールは固定（重なっている間は固定しない）
+          // 局所表面より深い眠りボールは固定（重なっている間は固定しない＝固定層を綺麗に保つ）。
           if (depth > freezeDepth) {
             if (!overlapsNeighbor(b, allBodies, metaRef.current, overlapDist2)) {
               Matter.Body.setStatic(b, true);
@@ -402,14 +408,14 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       const engine = engineRef.current;
       if (!engine) return;
       const body = Matter.Bodies.circle(x, y, ballSize * 0.44, {
-        restitution: 0.12,
+        restitution: 0.05, // ほぼ弾まない＝着地時に周囲を揺らしにくい（生成時のちらつき抑制）
         friction: 0.7,
         frictionStatic: 1.0,
         frictionAir: 0.012,
         density: 0.0016,
         slop: 0.002,
       });
-      body.sleepThreshold = 20; // 早めに眠らせる→早く固定→動的数を抑える
+      body.sleepThreshold = 16; // 早めに眠らせる→早く固定→揺れを早く止める
       metaRef.current.set(body.id, { emotion, variation, size: ballSize, hitUfo: false, hitGoal: false, prevY: y });
       Matter.Composite.add(engine.world, body);
       return body;
