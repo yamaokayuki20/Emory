@@ -28,24 +28,27 @@ interface Options {
 }
 
 interface BoxApi {
+  /** 動的（飛行中＋上層の眠り）ボール。毎フレーム更新。 */
   balls: BoxBall[];
+  /** 固定済み（静的）ボール。位置不変。固定が増えた時だけ更新。 */
+  frozenBalls: BoxBall[];
   restTopY: number; // 着地済みの山の最上端（飛行中は無視）
   activeCount: number; // 動いているボール数
   groundY: number;
-  /** 箱に1つ投入（ワールド座標 x,y と初速 vx,vy） */
   drop: (emotion: EmotionKey, variation: number, x: number, y: number, vx: number, vy: number) => void;
-  /** 既存エントリを底から積んで初期化（1度だけ） */
   seed: (entries: EmotionEntry[]) => void;
   setTarget: (t: { x: number; y: number; r: number } | null) => void;
-  /** ターゲット命中の立ち上がり（命中したワールド座標を返す。無ければ null） */
   consumeHit: () => { x: number; y: number } | null;
 }
 
 const WALL = 80;
 const GROUND_Y = 40000; // 箱の底（ワールド）。山はここから上へ積み上がる。
-// 山頂からこの深さ（ボール径の倍数）までを「動的に反応する上層」とし、
-// それより下の眠ったボールは静的に固定する（要調整ポイント）。
+// 山頂からこの深さ（径の倍数）までを「動的に反応する上層」とし、それより下の
+// 眠りボールは静的に固定する（負荷軽減・崩れ防止）。
 const ACTIVE_DEPTH_ROWS = 6;
+// 固定からさらにこの深さより下のボールは物理ワールドから除去（描画だけ残す）。
+// → 物理に残るボディ数を「上層＋固定の床帯」だけに抑え、総数に依存させない。
+const REMOVE_EXTRA_ROWS = 6;
 
 /** b が（見た目の径で）他のボールと重なっているか。重なり固定の防止に使う。 */
 function overlapsNeighbor(
@@ -65,11 +68,6 @@ function overlapsNeighbor(
   return false;
 }
 
-/**
- * 縦長の「箱」を1つの物理ワールドとして扱う。
- * - 下に重力。底に積もり、下ほどギチギチ。
- * - enableSleeping で落ち着いたボールは眠らせ、上部のアクティブな物理だけ回す。
- */
 export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   const engineRef = useRef<Matter.Engine | null>(null);
   const metaRef = useRef<Map<number, BallMeta>>(new Map());
@@ -77,8 +75,11 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   const hitRef = useRef<{ x: number; y: number } | null>(null);
   const rafRef = useRef<number | null>(null);
   const seededRef = useRef(false);
+  // 固定済み（静的・除去済み含む）ボールの描画データ。位置不変。
+  const frozenMapRef = useRef<Map<number, BoxBall>>(new Map());
 
   const [balls, setBalls] = useState<BoxBall[]>([]);
+  const [frozenBalls, setFrozenBalls] = useState<BoxBall[]>([]);
   const restTopRef = useRef(GROUND_Y);
   const [meta, setMeta] = useState({ restTopY: GROUND_Y, activeCount: 0 });
 
@@ -110,33 +111,50 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
       const tgt = targetRef.current;
       let activeCount = 0;
-      let settledTop = Infinity; // 着地済み（静的 or 眠り）の最上端
-      // 山頂から一定の深さより下の眠りボールは静的化（下層は固定、上層だけ動的）
+      let settledTop = Infinity;
       const freezeLine = restTopRef.current + ballSize * ACTIVE_DEPTH_ROWS;
+      const removeLine = restTopRef.current + ballSize * (ACTIVE_DEPTH_ROWS + REMOVE_EXTRA_ROWS);
       const allBodies = Matter.Composite.allBodies(engine.world);
-      // 見た目で重なっていたら固定しない閾値（中心間がこれ未満＝重なり）
       const overlapDist2 = (ballSize * 0.84 * 0.98) ** 2;
-      const render: BoxBall[] = [];
+      const dynamicRender: BoxBall[] = [];
+      const toRemove: Matter.Body[] = [];
+      let frozenChanged = false;
+
       for (const b of allBodies) {
         const m = metaRef.current.get(b.id);
-        if (!m) continue;
+        if (!m) continue; // 壁・地面
         const top = b.position.y - m.size / 2;
-        const settled = b.isStatic || b.isSleeping;
-        if (settled) {
+
+        if (b.isStatic) {
+          // 固定済み（床帯）。位置不変。深すぎるものは物理から除去（描画は frozenMap に残る）。
           if (top < settledTop) settledTop = top;
-          // 深い位置の眠りボールは固定。ただし「重なっている間は固定しない」
-          // （強い衝突で食い込んだ状態のまま固定＝重なり固定を防ぐ）。
-          if (!b.isStatic && b.isSleeping && b.position.y > freezeLine) {
+          if (b.position.y > removeLine) toRemove.push(b);
+          continue;
+        }
+
+        if (b.isSleeping) {
+          if (top < settledTop) settledTop = top;
+          // 深い眠りボールは固定（重なっている間は固定しない）
+          if (b.position.y > freezeLine) {
             if (!overlapsNeighbor(b, allBodies, metaRef.current, overlapDist2)) {
               Matter.Body.setStatic(b, true);
+              frozenMapRef.current.set(b.id, {
+                bodyId: b.id,
+                emotion: m.emotion,
+                variation: m.variation,
+                x: b.position.x,
+                y: b.position.y,
+                angle: b.angle,
+                size: m.size,
+              });
+              frozenChanged = true;
+              continue; // 固定したので動的層には入れない
             } else {
-              // 重なっている → 起こして解消させる（固定しない）
               Matter.Sleeping.set(b, false);
             }
           }
         } else {
           activeCount++;
-          // ターゲット命中（上昇中に1回だけ）
           if (tgt && !m.hitUfo) {
             const dx = b.position.x - tgt.x;
             const dy = b.position.y - tgt.y;
@@ -146,7 +164,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
             }
           }
         }
-        render.push({
+        // 動的（飛行中／上層の眠り）だけ毎フレーム描画
+        dynamicRender.push({
           bodyId: b.id,
           emotion: m.emotion,
           variation: m.variation,
@@ -156,13 +175,20 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
           size: m.size,
         });
       }
-      // カメラ基準は「着地済み」の最上端のみ。落下中/跳ね中は無視（追わない）。
-      // 着地球がまだ無い間は前の値を保持する。
+
+      // 深い固定ボールを物理ワールドから除去（描画は frozenMap に残す）
+      for (const b of toRemove) {
+        Matter.Composite.remove(engine.world, b);
+        metaRef.current.delete(b.id);
+      }
+
       if (settledTop !== Infinity) restTopRef.current = settledTop;
 
-      // アクティブが居る間だけ描画更新（アイドル時は再描画しない）
+      if (frozenChanged) setFrozenBalls(Array.from(frozenMapRef.current.values()));
+
+      // 動的が居る間だけ動的層を更新（アイドル時は再描画しない）
       if (activeCount > 0 || prevActive !== 0) {
-        setBalls(render);
+        setBalls(dynamicRender);
         setMeta({ restTopY: restTopRef.current, activeCount });
       }
       prevActive = activeCount;
@@ -177,6 +203,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       Matter.Engine.clear(engine);
       engineRef.current = null;
       metaRef.current.clear();
+      frozenMapRef.current.clear();
     };
   }, [width]);
 
@@ -184,8 +211,6 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     (emotion: EmotionKey, variation: number, x: number, y: number) => {
       const engine = engineRef.current;
       if (!engine) return;
-      // 当たり半径は見た目より僅かに大きく(0.44)、slop小で「絶対に重ならない」。
-      // 弾性は控えめ＝強い衝突でも跳ね返って食い込みにくい。固定はしない（動的）。
       const body = Matter.Bodies.circle(x, y, ballSize * 0.44, {
         restitution: 0.12,
         friction: 0.7,
@@ -213,19 +238,11 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     (entries: EmotionEntry[]) => {
       if (seededRef.current || !engineRef.current || width <= 0) return;
       seededRef.current = true;
-      // 重力で settle 済みの最終位置（純粋関数。デグレ監視は scripts/check-spec.ts）。
-      const { placements, topY } = computeSettledPile(entries, {
-        width,
-        ballSize,
-        groundY: GROUND_Y,
-      });
-      // 最初から眠らせて置く＝ロード時に settle で揺れない／カメラが動かない。
-      // 動的なので衝突時は wake して反応する。配置自体が重なり無し。
+      const { placements, topY } = computeSettledPile(entries, { width, ballSize, groundY: GROUND_Y });
       for (const p of placements) {
         const body = addBody(p.emotion, p.variation, p.x, p.y);
         if (body) Matter.Sleeping.set(body, true);
       }
-      // 初期のカメラ基準＝配置した山頂
       restTopRef.current = topY;
       setMeta({ restTopY: topY, activeCount: 0 });
     },
@@ -244,6 +261,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
   return {
     balls,
+    frozenBalls,
     restTopY: meta.restTopY,
     activeCount: meta.activeCount,
     groundY: GROUND_Y,
