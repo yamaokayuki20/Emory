@@ -20,6 +20,7 @@ interface BallMeta {
   variation: number;
   size: number;
   hitUfo: boolean;
+  hitGoal: boolean;
 }
 
 interface Options {
@@ -40,6 +41,9 @@ interface BoxApi {
   seed: (entries: EmotionEntry[]) => void;
   setTarget: (t: { x: number; y: number; r: number } | null) => void;
   consumeHit: () => { x: number; y: number } | null;
+  /** バスケ（固定ゴール）の当たり判定円 */
+  setGoal: (t: { x: number; y: number; r: number } | null) => void;
+  consumeGoalHit: () => { x: number; y: number } | null;
 }
 
 const WALL = 80;
@@ -90,6 +94,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   const metaRef = useRef<Map<number, BallMeta>>(new Map());
   const targetRef = useRef<{ x: number; y: number; r: number } | null>(null);
   const hitRef = useRef<{ x: number; y: number } | null>(null);
+  const goalRef = useRef<{ x: number; y: number; r: number } | null>(null);
+  const goalHitRef = useRef<{ x: number; y: number } | null>(null);
   const rafRef = useRef<number | null>(null);
   const seededRef = useRef(false);
   // 固定済み（静的・除去済み含む）ボールの描画データ。位置不変・y昇順。
@@ -218,6 +224,16 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
               hitRef.current = { x: tgt.x, y: tgt.y };
             }
           }
+          // バスケ（固定ゴール）の当たり判定
+          const goal = goalRef.current;
+          if (goal && !m.hitGoal) {
+            const gx = b.position.x - goal.x;
+            const gy = b.position.y - goal.y;
+            if (gx * gx + gy * gy < goal.r * goal.r) {
+              m.hitGoal = true;
+              goalHitRef.current = { x: goal.x, y: goal.y };
+            }
+          }
         }
         // 動的（飛行中／上層の眠り）だけ毎フレーム描画
         dynamicRender.push({
@@ -277,7 +293,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         slop: 0.002,
       });
       body.sleepThreshold = 20; // 早めに眠らせる→早く固定→動的数を抑える
-      metaRef.current.set(body.id, { emotion, variation, size: ballSize, hitUfo: false });
+      metaRef.current.set(body.id, { emotion, variation, size: ballSize, hitUfo: false, hitGoal: false });
       Matter.Composite.add(engine.world, body);
       return body;
     },
@@ -317,6 +333,16 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     return h;
   }, []);
 
+  const setGoal = useCallback((t: { x: number; y: number; r: number } | null) => {
+    goalRef.current = t;
+  }, []);
+
+  const consumeGoalHit = useCallback(() => {
+    const h = goalHitRef.current;
+    goalHitRef.current = null;
+    return h;
+  }, []);
+
   return {
     balls,
     frozenSorted: frozenSortedRef.current,
@@ -328,5 +354,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     seed,
     setTarget,
     consumeHit,
+    setGoal,
+    consumeGoalHit,
   };
 }
