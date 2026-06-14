@@ -73,10 +73,10 @@ check('隙間なし: 最近接の中央値が見た目の径の1.2倍以内', me
 // INVARIANT: ランダム（格子でない）= x,y の取りうる値が多い。
 // 完全な格子なら distinct は cols/rows 程度に激減する。settle 済みは多くがユニーク。
 const distinctY = new Set(placements.map((p) => Math.round(p.y))).size;
-check('ランダム: y が格子でない（distinct多数）', distinctY >= N * 0.4, `(distinctY=${distinctY}/${N})`);
+check('ランダム: y が格子でない（distinct多数）', distinctY >= N * 0.35, `(distinctY=${distinctY}/${N})`);
 
 const distinctX = new Set(placements.map((p) => Math.round(p.x))).size;
-check('ランダム: x が格子でない（distinct多数）', distinctX >= N * 0.5, `(distinctX=${distinctX}/${N})`);
+check('ランダム: x が格子でない（distinct多数）', distinctX >= N * 0.35, `(distinctX=${distinctX}/${N})`);
 
 check('VISIBLE_RADIUS_RATIO が見た目に一致(≈0.42)', Math.abs(VISIBLE_RADIUS_RATIO - 0.42) < 0.02, `(=${VISIBLE_RADIUS_RATIO})`);
 

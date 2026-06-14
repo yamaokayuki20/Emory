@@ -34,13 +34,13 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b22 settle';
+const BUILD = 'b24 settle';
 
 // スリンガー
 const STRETCH_MAX = 140;
 const STRETCH_K = 78;
 const STRETCH_TO_VEL = 0.14; // ×1.5
-const VEL_MAX = 21;
+const VEL_MAX = 16;
 
 // 画面内のレイアウト割合（箱はヘッダー直下のフル高さ。上部にピッカーを半透明オーバーレイ）
 const UFO_FRAC = 0.18; // UFOの表示y（ピッカーの下）
