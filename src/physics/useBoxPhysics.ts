@@ -3,7 +3,7 @@ import Matter from 'matter-js';
 
 import { EmotionEntry } from '../storage/entries';
 import { EmotionKey } from '../theme/emotions';
-import { computeSettledPile } from '../layout/settlePile';
+import { computeDateBandedPile, DateBoundary } from '../layout/dateBands';
 
 export interface BoxBall {
   bodyId: number;
@@ -34,6 +34,7 @@ interface BoxApi {
   /** 固定済み（静的）ボール。y昇順・位置不変。参照は安定、変化は frozenVersion で通知。 */
   frozenSorted: BoxBall[];
   frozenVersion: number;
+  boundaries: DateBoundary[];
   restTopY: number; // 着地済みの山の最上端（飛行中は無視）
   activeCount: number; // 動いているボール数
   groundY: number;
@@ -104,6 +105,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
   const [balls, setBalls] = useState<BoxBall[]>([]);
   const [frozenVersion, setFrozenVersion] = useState(0);
+  const [boundaries, setBoundaries] = useState<DateBoundary[]>([]);
   const restTopRef = useRef(GROUND_Y);
   const [meta, setMeta] = useState({ restTopY: GROUND_Y, activeCount: 0 });
 
@@ -312,12 +314,14 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     (entries: EmotionEntry[]) => {
       if (seededRef.current || !engineRef.current || width <= 0) return;
       seededRef.current = true;
-      const { placements, topY } = computeSettledPile(entries, { width, ballSize, groundY: GROUND_Y });
+      // 日付ごとにバンド（層）で積む。境界（点線用）も取得。
+      const { placements, boundaries, topY } = computeDateBandedPile(entries, { width, ballSize, groundY: GROUND_Y });
       for (const p of placements) {
         const body = addBody(p.emotion, p.variation, p.x, p.y);
         if (body) Matter.Sleeping.set(body, true);
       }
       restTopRef.current = topY;
+      setBoundaries(boundaries);
       setMeta({ restTopY: topY, activeCount: 0 });
     },
     [addBody, ballSize, width]
@@ -347,6 +351,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     balls,
     frozenSorted: frozenSortedRef.current,
     frozenVersion,
+    boundaries,
     restTopY: meta.restTopY,
     activeCount: meta.activeCount,
     groundY: GROUND_Y,
