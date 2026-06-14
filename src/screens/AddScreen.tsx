@@ -34,13 +34,35 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b25 perf';
+const BUILD = 'b32 perf';
+
+// 固定層の可視判定マージン
+const CULL_MARGIN = BALL * 2;
+
+/** y昇順配列から [top, bottom] のワールドy帯に入る連続スライスを返す（二分探索, O(log F + visible)）。 */
+function visibleSlice(sorted: BoxBall[], top: number, bottom: number): BoxBall[] {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid].y < top) lo = mid + 1;
+    else hi = mid;
+  }
+  const start = lo;
+  hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid].y <= bottom) lo = mid + 1;
+    else hi = mid;
+  }
+  return sorted.slice(start, lo);
+}
 
 // スリンガー
 const STRETCH_MAX = 140;
 const STRETCH_K = 78;
 const STRETCH_TO_VEL = 0.14; // ×1.5
-const VEL_MAX = 16;
+const VEL_MAX = 11;
 
 // 画面内のレイアウト割合（箱はヘッダー直下のフル高さ。上部にピッカーを半透明オーバーレイ）
 const UFO_FRAC = 0.18; // UFOの表示y（ピッカーの下）
@@ -66,37 +88,29 @@ function tension(dx: number, dy: number) {
   return { x: (dx / mag) * t, y: (dy / mag) * t, mag: t };
 }
 
-/** ボール群を画面外カリングして描画する層。props が変わった時だけ再描画（memo）。 */
-const BallsLayer = React.memo(function BallsLayer({
-  balls,
-  cameraY,
-  height,
-}: {
-  balls: BoxBall[];
-  cameraY: number;
-  height: number;
-}) {
+/**
+ * ボール群を「ワールド座標の絶対位置」で描画する層（memo）。
+ * カメラ移動は親コンテナの translateY 一括変換で行うため、ここは cameraY に依存しない。
+ * → スクロール（カメラ移動）では再描画されず、balls が変わった時だけ再描画される。
+ */
+const BallsLayer = React.memo(function BallsLayer({ balls }: { balls: BoxBall[] }) {
   return (
-    <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      {balls.map((b) => {
-        const sy = b.y - cameraY;
-        if (sy < -BALL || sy > height + BALL) return null; // 画面外は描かない
-        return (
-          <EmotionBall
-            key={b.bodyId}
-            emotion={b.emotion}
-            variation={b.variation}
-            size={b.size}
-            style={{
-              position: 'absolute',
-              left: b.x - b.size / 2,
-              top: sy - b.size / 2,
-              transform: [{ rotate: `${b.angle}rad` }],
-            }}
-          />
-        );
-      })}
-    </View>
+    <>
+      {balls.map((b) => (
+        <EmotionBall
+          key={b.bodyId}
+          emotion={b.emotion}
+          variation={b.variation}
+          size={b.size}
+          style={{
+            position: 'absolute',
+            left: b.x - b.size / 2,
+            top: b.y - b.size / 2,
+            transform: [{ rotate: `${b.angle}rad` }],
+          }}
+        />
+      ))}
+    </>
   );
 });
 
@@ -126,10 +140,8 @@ function AddScreen({ entries, onAdd }: Props) {
 
   const target = useMemo(() => targetForToday(), []);
 
-  const { balls, frozenBalls, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit } = useBoxPhysics({
-    width: area.w,
-    ballSize: BALL,
-  });
+  const { balls, frozenSorted, frozenVersion, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit } =
+    useBoxPhysics({ width: area.w, ballSize: BALL });
 
   // 最新値を ref に同期（コールバック/ループ用）
   const areaRef = useRef(area);
@@ -172,9 +184,9 @@ function AddScreen({ entries, onAdd }: Props) {
     }
   }, [restTopY, area.h, groundY]);
 
-  // カメラ補正：山が積み上がって上端が TOP_LIMIT より高くなった時だけ、ゆっくり「下げる」。
-  // 自動で上げる（せり上がる）挙動はしない＝下げる一方向のみ（cameraY は減るだけ）。
-  const correctingRef = useRef(false);
+  // カメラは山頂へ滑らかに追従（上方向のみ）。山は積むほど高くなり restTop は単調に
+  // 小さくなる→カメラは上にだけ動く（せり上がる往復は起きない）。これで画面内の固定
+  // ボールは「最新の1画面分」に頭打ちになり、描画コストが総数に依存しなくなる。
   useEffect(() => {
     let on = true;
     let raf = 0;
@@ -183,24 +195,12 @@ function AddScreen({ entries, onAdd }: Props) {
       if (followRef.current) {
         const a = areaRef.current;
         if (a.h > 0) {
-          const restScreenY = restTopRef.current - cameraYRef.current;
-          if (restScreenY < a.h * TOP_LIMIT_FRAC) correctingRef.current = true;
-          if (correctingRef.current) {
-            const tgt = restTopRef.current - a.h * TARGET_FRAC; // 下げ先
-            // 下げる方向（cameraY を減らす）だけ。上げ方向にはしない。
-            if (tgt >= cameraYRef.current - 0.4) {
-              correctingRef.current = false;
-            } else {
-              setCameraY((prev) => {
-                const next = prev + (tgt - prev) * 0.06; // ゆっくり
-                if (Math.abs(next - prev) < 0.4) {
-                  correctingRef.current = false;
-                  return tgt;
-                }
-                return next;
-              });
-            }
-          }
+          const tgt = restTopRef.current - a.h * TARGET_FRAC;
+          setCameraY((prev) => {
+            if (tgt >= prev - 0.4) return prev; // 下げ（上昇表示）方向には動かさない
+            const next = prev + (tgt - prev) * 0.15;
+            return Math.abs(next - prev) < 0.4 ? tgt : next;
+          });
         }
       }
       raf = requestAnimationFrame(tick);
@@ -360,6 +360,17 @@ function AddScreen({ entries, onAdd }: Props) {
     outputRange: [-UFO_OFF - UFO_SIZE / 2, area.w + UFO_OFF - UFO_SIZE / 2],
   });
 
+  // 固定層は「画面内のスライス」だけ描画。カメラは20pxバケットに量子化して再計算を抑える。
+  const CAM_BUCKET = 20;
+  const camBucket = Math.round(cameraY / CAM_BUCKET);
+  const frozenVisible = useMemo(() => {
+    if (area.h <= 0 || frozenSorted.length === 0) return frozenSorted;
+    const camTop = camBucket * CAM_BUCKET;
+    return visibleSlice(frozenSorted, camTop - CULL_MARGIN, camTop + area.h + CULL_MARGIN);
+    // frozenSorted は参照不変。変化は frozenVersion で検知する。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frozenVersion, camBucket, area.h]);
+
   return (
     <View style={styles.screen}>
       <Header remaining={remaining} debugUnlimited={unlimited} onToggleDebug={toggleDebug} />
@@ -371,10 +382,14 @@ function AddScreen({ entries, onAdd }: Props) {
           <View style={StyleSheet.absoluteFill} />
         </PanGestureHandler>
 
-        {/* 固定層（位置不変・memo化。固定追加かカメラ移動時だけ再描画） */}
-        <BallsLayer balls={frozenBalls} cameraY={cameraY} height={area.h} />
-        {/* 動的層（飛行中＋上層の眠り・毎フレーム） */}
-        <BallsLayer balls={balls} cameraY={cameraY} height={area.h} />
+        {/* カメラはこのコンテナの translateY 一括変換で表現（スクロールは1ノード更新のみ）。
+            中のボールはワールド座標固定 → 固定層はカメラ移動で再描画されない。 */}
+        <View style={[StyleSheet.absoluteFill, { transform: [{ translateY: -cameraY }] }]} pointerEvents="none">
+          {/* 固定層（位置不変・memo化。固定追加（=可視スライス変化）時だけ再描画） */}
+          <BallsLayer balls={frozenVisible} />
+          {/* 動的層（飛行中＋上層の眠り・毎フレーム） */}
+          <BallsLayer balls={balls} />
+        </View>
 
         {/* UFO */}
         {area.w > 0 && ufoVisible && (
