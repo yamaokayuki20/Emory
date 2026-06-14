@@ -28,8 +28,12 @@ export async function loadEntries(): Promise<EmotionEntry[]> {
   }
 }
 
+// 保存件数の上限（直近のみ保持。巨大化と保存コストの増大を防ぐ）。
+export const MAX_STORED_ENTRIES = 600;
+
 export async function saveEntries(entries: EmotionEntry[]): Promise<void> {
-  await AsyncStorage.setItem(ENTRIES_KEY, JSON.stringify(entries));
+  const capped = entries.length > MAX_STORED_ENTRIES ? entries.slice(-MAX_STORED_ENTRIES) : entries;
+  await AsyncStorage.setItem(ENTRIES_KEY, JSON.stringify(capped));
 }
 
 export async function addEntry(entry: EmotionEntry): Promise<EmotionEntry[]> {

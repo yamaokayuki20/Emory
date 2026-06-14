@@ -46,12 +46,14 @@ const WALL = 80;
 const GROUND_Y = 40000; // 箱の底（ワールド）。山はここから上へ積み上がる。
 // 山頂からこの深さ（径の倍数）までを「動的に反応する上層」とし、それより下の
 // 眠りボールは静的に固定する（負荷軽減・崩れ防止）。固定層を表面に近づける。
-const ACTIVE_DEPTH_ROWS = 4;
+const ACTIVE_DEPTH_ROWS = 2;
 // 固定からさらにこの深さより下のボールは物理ワールドから除去（描画だけ残す）。
 // 浅め＝物理に残るボディを「上層＋薄い床帯」だけに束ね、総数に依存させない（性能の要）。
 const REMOVE_EXTRA_ROWS = 2;
 // 当たり判定＝見た目の径＋1px（重ならないための最小間隔）。
 const GAP_PX = 1;
+// 描画・追跡する固定ボールの上限（画面外に流れた古いものは破棄＝総数非依存に保つ）。
+const MAX_FROZEN = 180;
 
 /** y昇順を保ったまま挿入（二分探索）。固定ボールは位置不変なので順序も不変。 */
 function insertSortedByY(arr: BoxBall[], b: BoxBall) {
@@ -159,8 +161,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       const freezeLine = restTopRef.current + ballSize * ACTIVE_DEPTH_ROWS;
       const removeLine = restTopRef.current + ballSize * (ACTIVE_DEPTH_ROWS + REMOVE_EXTRA_ROWS);
       const allBodies = Matter.Composite.allBodies(engine.world);
-      // 固定は「見た目の径+1px」以上離れている時だけ（重なり中は固定しない）
-      const overlapDist2 = (ballSize * 0.84 + GAP_PX) ** 2;
+      // 固定は「見た目で重なっていない（中心間が見た目の径以上）」時だけ。
+      // 体半径(0.44)は見た目(0.42)より大きいので、わずかな食い込みは見た目重なりにならない。
+      const overlapDist2 = (ballSize * 0.84) ** 2;
       const dynamicRender: BoxBall[] = [];
       const toRemove: Matter.Body[] = [];
       let frozenChanged = false;
@@ -194,6 +197,11 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
               };
               frozenMapRef.current.set(b.id, fb);
               insertSortedByY(frozenSortedRef.current, fb); // y昇順を維持
+              // 上限超過：最も深い（=最古・画面外下）ものを破棄して総数を頭打ちに
+              while (frozenSortedRef.current.length > MAX_FROZEN) {
+                const old = frozenSortedRef.current.pop();
+                if (old) frozenMapRef.current.delete(old.bodyId);
+              }
               frozenChanged = true;
               continue; // 固定したので動的層には入れない
             } else {
@@ -268,6 +276,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         density: 0.0016,
         slop: 0.002,
       });
+      body.sleepThreshold = 20; // 早めに眠らせる→早く固定→動的数を抑える
       metaRef.current.set(body.id, { emotion, variation, size: ballSize, hitUfo: false });
       Matter.Composite.add(engine.world, body);
       return body;
