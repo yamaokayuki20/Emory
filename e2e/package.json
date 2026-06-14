@@ -1,0 +1,8 @@
+{
+  "name": "emory-e2e",
+  "private": true,
+  "description": "エモリー 動作テスト基本パック（ヘッドレス実機テスト）",
+  "dependencies": {
+    "puppeteer": "^23.0.0"
+  }
+}

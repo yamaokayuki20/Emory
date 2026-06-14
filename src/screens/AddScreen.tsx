@@ -37,7 +37,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b41 layer';
+const BUILD = 'b42 pack';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -63,6 +63,9 @@ function visibleSlice(sorted: BoxBall[], top: number, bottom: number): BoxBall[]
 
 // 投擲（タップ=自由落下 / フリック=投げる）
 const FLICK_THRESHOLD = 240; // px/s 以上で「投げ」、未満は「タップ＝自由落下」
+// 局所表面よりこの分だけ上でないと投擲ゾーンと見なさない（表面付近の取りこぼし／
+// 層への誤生成を防ぐ余白）。山の上面ぴったりや内部はタップしても無反応＝掴む側。
+const SPAWN_MARGIN = 18;
 const FLICK_SCALE = 0.014;
 const FLICK_MAX = 18;
 
@@ -310,6 +313,10 @@ function AddScreen({ entries, onAdd }: Props) {
       // バスケ命中＝スコア演出
       const g = consumeGoalHit();
       if (g) {
+        if (typeof window !== 'undefined') {
+          const w = window as unknown as { __emoryGoals?: number };
+          w.__emoryGoals = (w.__emoryGoals ?? 0) + 1;
+        }
         setBurst({ key: Date.now() + 1, x: g.x, y: g.y - cameraYRef.current });
         setShootMsg(true);
         if (shootTimer.current) clearTimeout(shootTimer.current);
@@ -343,6 +350,11 @@ function AddScreen({ entries, onAdd }: Props) {
       const worldY = cameraYRef.current + spawnScreenY;
       drop(selected, entry.variation, spawnX, worldY, vx, vy);
       followRef.current = true;
+      // デバッグ用の投擲カウンタ（自己テストの計測に使用。実害なし）。
+      if (typeof window !== 'undefined') {
+        const w = window as unknown as { __emoryThrows?: number };
+        w.__emoryThrows = (w.__emoryThrows ?? 0) + 1;
+      }
     },
     [selected, onAdd, drop]
   );
@@ -354,13 +366,20 @@ function AddScreen({ entries, onAdd }: Props) {
     [surfaceYAt]
   );
 
+  // 自己テスト用フック（局所表面の画面y）。実害なし・軽量。
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __emorySurf?: (x: number) => number }).__emorySurf = surfaceScreenYAt;
+    }
+  }, [surfaceScreenYAt]);
+
   // タップ＝触れた場所にその場で自由落下（上の空間のみ／連続タップ対応：1タップ1個）。
   const onTap = useCallback(
     (e: TapGestureHandlerStateChangeEvent) => {
       if (e.nativeEvent.state !== State.ACTIVE) return;
       const { x, y } = e.nativeEvent;
-      // 絵文字層の上面より下をタップ＝何もしない（層の内部に湧いてすり抜けるのを防止）。
-      if (y >= surfaceScreenYAt(x)) return;
+      // 絵文字層の上面（少し余白）より下をタップ＝何もしない（層内への誤生成・すり抜け防止）。
+      if (y >= surfaceScreenYAt(x) - SPAWN_MARGIN) return;
       const a = areaRef.current;
       void doLaunch(clamp(x, BALL / 2, a.w - BALL / 2), y, 0, 0);
     },
@@ -391,7 +410,7 @@ function AddScreen({ entries, onAdd }: Props) {
       const { state: st, x, y, velocityX, velocityY } = e.nativeEvent;
       if (st === State.BEGAN) {
         panMovedRef.current = false;
-        if (y < surfaceScreenYAt(x)) {
+        if (y < surfaceScreenYAt(x) - SPAWN_MARGIN) {
           // 上の空間＝投擲ゾーン（カメラは触らない）
           panZoneRef.current = 'throw';
         } else {
