@@ -20,7 +20,8 @@ import EmotionPicker from '../components/EmotionPicker';
 import Fireworks from '../components/Fireworks';
 import Header from '../components/Header';
 import TrajectoryLine from '../components/TrajectoryLine';
-import { BasketHoop, Ufo, targetForToday } from '../components/targets';
+import { Ufo } from '../components/targets';
+import BasketHoop, { BASKET_ASPECT, BASKET_HIT } from '../components/targets/BasketHoop';
 import { useBoxPhysics, BoxBall } from '../physics/useBoxPhysics';
 import { EmotionEntry } from '../storage/entries';
 import { consumeThrow, getThrowState, isDebugUnlimited, setDebugUnlimited } from '../storage/rateLimit';
@@ -34,7 +35,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b32 perf';
+const BUILD = 'b34 basket';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -74,8 +75,14 @@ const TARGET_FRAC = 0.44; // 下げ先（上端をこの位置へ）
 
 const UFO_SIZE = 58;
 const UFO_OFF = 70;
+const UFO_HIT_R = 34;
 const PATROL_MS = 5200;
 const RESPAWN_MS = 2200;
+
+// 固定バスケットゴール（上部・シュート用）
+const BASKET_W = 116;
+const BASKET_LEFT = 6;
+const BASKET_TOP_FRAC = 0.135;
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
@@ -138,9 +145,11 @@ function AddScreen({ entries, onAdd }: Props) {
   const [burst, setBurst] = useState<{ key: number; x: number; y: number } | null>(null);
   const respawnTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const target = useMemo(() => targetForToday(), []);
+  // スコア演出（バスケ命中）
+  const [shootMsg, setShootMsg] = useState(false);
+  const shootTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const { balls, frozenSorted, frozenVersion, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit } =
+  const { balls, frozenSorted, frozenVersion, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit, setGoal, consumeGoalHit } =
     useBoxPhysics({ width: area.w, ballSize: BALL });
 
   // 最新値を ref に同期（コールバック/ループ用）
@@ -226,17 +235,28 @@ function AddScreen({ entries, onAdd }: Props) {
     return () => loop.stop();
   }, [area.w, ufoX]);
 
+  // 固定バスケットの画面ジオメトリ（スコア判定位置）
+  const basket = useMemo(() => {
+    const w = BASKET_W;
+    const h = BASKET_W * BASKET_ASPECT;
+    const left = BASKET_LEFT;
+    const top = area.h * BASKET_TOP_FRAC;
+    return { w, h, left, top, hitX: left + BASKET_HIT.fx * w, hitScreenY: top + BASKET_HIT.fy * h, r: BASKET_HIT.fr * w };
+  }, [area.h]);
+  const basketRef = useRef(basket);
+  basketRef.current = basket;
+
   // UFO 位置に追従してターゲット（ワールド座標）を更新
   useEffect(() => {
     if (area.w <= 0) return;
     const id = ufoX.addListener(({ value }) => {
       const x = -UFO_OFF + value * (area.w + UFO_OFF * 2);
       const worldY = cameraYRef.current + area.h * UFO_FRAC;
-      if (ufoVisibleRef.current) setTarget({ x, y: worldY, r: target.hitRadius });
+      if (ufoVisibleRef.current) setTarget({ x, y: worldY, r: UFO_HIT_R });
       else setTarget(null);
     });
     return () => ufoX.removeListener(id);
-  }, [area.w, area.h, target.hitRadius, setTarget, ufoX]);
+  }, [area.w, area.h, setTarget, ufoX]);
 
   // 命中監視（hook からの立ち上がりを拾う）
   useEffect(() => {
@@ -244,6 +264,11 @@ function AddScreen({ entries, onAdd }: Props) {
     let raf = 0;
     const tick = () => {
       if (!on) return;
+      // 固定バスケのスコア判定円を毎フレーム更新（画面固定→ワールドはカメラ依存）
+      const bk = basketRef.current;
+      if (areaRef.current.w > 0) {
+        setGoal({ x: bk.hitX, y: cameraYRef.current + bk.hitScreenY, r: bk.r });
+      }
       const h = consumeHit();
       if (h && ufoVisibleRef.current) {
         setBurst({ key: Date.now(), x: h.x, y: h.y - cameraYRef.current });
@@ -256,6 +281,14 @@ function AddScreen({ entries, onAdd }: Props) {
           setUfoVisible(true);
         }, RESPAWN_MS);
       }
+      // バスケ命中＝スコア演出
+      const g = consumeGoalHit();
+      if (g) {
+        setBurst({ key: Date.now() + 1, x: g.x, y: g.y - cameraYRef.current });
+        setShootMsg(true);
+        if (shootTimer.current) clearTimeout(shootTimer.current);
+        shootTimer.current = setTimeout(() => setShootMsg(false), 1100);
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -263,8 +296,9 @@ function AddScreen({ entries, onAdd }: Props) {
       on = false;
       cancelAnimationFrame(raf);
       if (respawnTimer.current) clearTimeout(respawnTimer.current);
+      if (shootTimer.current) clearTimeout(shootTimer.current);
     };
-  }, [consumeHit, setTarget]);
+  }, [consumeHit, setTarget, setGoal, consumeGoalHit]);
 
   const onZoneLayout = useCallback((e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
@@ -391,18 +425,32 @@ function AddScreen({ entries, onAdd }: Props) {
           <BallsLayer balls={balls} />
         </View>
 
-        {/* UFO */}
+        {/* 固定バスケットゴール（上部・シュート用） */}
+        {area.w > 0 && (
+          <View style={{ position: 'absolute', left: basket.left, top: basket.top }} pointerEvents="none">
+            <BasketHoop width={basket.w} />
+          </View>
+        )}
+
+        {/* UFO（飛行ターゲット） */}
         {area.w > 0 && ufoVisible && (
           <Animated.View
             style={[styles.ufo, { top: area.h * UFO_FRAC - UFO_SIZE * 0.35, width: UFO_SIZE, transform: [{ translateX: ufoTranslate }] }]}
             pointerEvents="none"
           >
-            {target.kind === 'ufo' ? <Ufo size={UFO_SIZE} active={false} /> : <BasketHoop size={UFO_SIZE} active={false} />}
+            <Ufo size={UFO_SIZE} active={false} />
           </Animated.View>
         )}
 
         {/* 花火 */}
         {burst && <Fireworks key={burst.key} x={burst.x} y={burst.y} onDone={() => setBurst(null)} />}
+
+        {/* スコア演出 */}
+        {shootMsg && (
+          <View style={styles.shoot} pointerEvents="none">
+            <Text style={styles.shootText}>ナイスシュート！</Text>
+          </View>
+        )}
 
         {/* 張力帯＋予測軌道 */}
         {drag && area.w > 0 && (
@@ -462,6 +510,8 @@ const styles = StyleSheet.create({
   box: { flex: 1, position: 'relative', overflow: 'hidden', backgroundColor: bg.sunk },
   overlay: { position: 'absolute', left: 0, top: 0 },
   ufo: { position: 'absolute', left: 0, alignItems: 'center' },
+  shoot: { position: 'absolute', alignSelf: 'center', top: '20%' },
+  shootText: { fontSize: 22, fontWeight: '800', color: '#C57B57', letterSpacing: 1 },
   ready: { position: 'absolute' },
   hint: { position: 'absolute', alignSelf: 'center', top: '8%', alignItems: 'center', gap: 4 },
   hintText: { fontSize: 12, color: text.faint, letterSpacing: 1 },
