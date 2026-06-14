@@ -35,9 +35,9 @@ export interface SettleOptions {
   steps?: number;
 }
 
-// 物理ボディ半径（径比）。実機 useBoxPhysics と一致させること。
-// 見た目の半径(≈0.42)より少し大きくして、見た目のボールが絶対に重ならないようにする。
-export const BODY_RADIUS_RATIO = 0.45;
+// 物理ボディ半径（径比）。見た目の半径と一致させ、接触＝見た目も接触（隙間なし）に。
+// settle 精度を上げて重なり（食い込み）も最小化する。
+export const BODY_RADIUS_RATIO = 0.44;
 // 見た目のボール半径（透明余白を除いた実寸）。重なり判定はこちらで行う。
 export const VISIBLE_RADIUS_RATIO = 0.42;
 
@@ -60,8 +60,8 @@ export function computeSettledPile(entries: EmotionEntry[], opts: SettleOptions)
 
   const engine = Matter.Engine.create();
   engine.gravity.y = 1;
-  engine.positionIterations = 12; // しっかり詰める（食い込み低減）
-  engine.velocityIterations = 8;
+  engine.positionIterations = 16; // しっかり詰める（食い込み低減）
+  engine.velocityIterations = 10;
 
   const ground = Matter.Bodies.rectangle(width / 2, groundY + 40, width + WALL * 2, 80, { isStatic: true });
   const left = Matter.Bodies.rectangle(-WALL / 2, groundY - 4000, WALL, 12000, { isStatic: true });
@@ -81,16 +81,16 @@ export function computeSettledPile(entries: EmotionEntry[], opts: SettleOptions)
     const row = Math.floor(i / cols);
     const col = i % cols;
     const offset = row % 2 === 0 ? 0 : pitchX / 2;
-    let x = minX + offset + col * pitchX + rng(e.id, 7) * r * 0.5;
+    let x = minX + offset + col * pitchX + rng(e.id, 7) * r * 1.1;
     x = Math.max(minX, Math.min(maxX, x));
     const y = groundY - r - row * rowH - r;
     const body = Matter.Bodies.circle(x, y, r, {
-      restitution: 0.05,
-      friction: 0.9,
-      frictionStatic: 1,
+      restitution: 0.0,
+      friction: 0.45,
+      frictionStatic: 0.6,
       frictionAir: 0.02,
       density: 0.001,
-      slop: 0.01,
+      slop: 0.003,
     });
     bodies.push(body);
     Matter.Composite.add(engine.world, body);
