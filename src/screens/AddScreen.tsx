@@ -37,7 +37,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b40 zone';
+const BUILD = 'b41 layer';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -173,7 +173,7 @@ function AddScreen({ entries, onAdd }: Props) {
   microRef.current = micro;
   const cycleMicro = useCallback(() => setMicro((m) => (m === 'ufo' ? 'basket' : 'ufo')), []);
 
-  const { balls, frozenSorted, frozenVersion, boundaries, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit, setGoal, consumeGoalHit } =
+  const { balls, frozenSorted, frozenVersion, boundaries, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit, setGoal, consumeGoalHit, surfaceYAt } =
     useBoxPhysics({ width: area.w, ballSize: BALL });
 
   // 最新値を ref に同期（コールバック/ループ用）
@@ -347,19 +347,24 @@ function AddScreen({ entries, onAdd }: Props) {
     [selected, onAdd, drop]
   );
 
-  // 山の上面（最上端ボール）の画面y。これより上＝空間（投擲）、下＝絵文字層（掴む）。
-  const surfaceScreenY = useCallback(() => restTopRef.current - cameraYRef.current, []);
+  // 指のx位置の「局所表面」の画面y。これ以上（下）＝絵文字層（掴む／生成しない）、
+  // これより上＝空間（投擲）。山が凸凹でも列ごとの表面で正しく判定する。
+  const surfaceScreenYAt = useCallback(
+    (screenX: number) => surfaceYAt(screenX) - cameraYRef.current,
+    [surfaceYAt]
+  );
 
   // タップ＝触れた場所にその場で自由落下（上の空間のみ／連続タップ対応：1タップ1個）。
   const onTap = useCallback(
     (e: TapGestureHandlerStateChangeEvent) => {
       if (e.nativeEvent.state !== State.ACTIVE) return;
       const { x, y } = e.nativeEvent;
-      if (y >= surfaceScreenY()) return; // 絵文字層の上をタップ＝何もしない（掴むのはドラッグ）
+      // 絵文字層の上面より下をタップ＝何もしない（層の内部に湧いてすり抜けるのを防止）。
+      if (y >= surfaceScreenYAt(x)) return;
       const a = areaRef.current;
       void doLaunch(clamp(x, BALL / 2, a.w - BALL / 2), y, 0, 0);
     },
-    [doLaunch, surfaceScreenY]
+    [doLaunch, surfaceScreenYAt]
   );
 
   // パン中：投擲ゾーンなら絵文字を指先に追従、スクロールゾーンならカメラを動かす。
@@ -386,7 +391,7 @@ function AddScreen({ entries, onAdd }: Props) {
       const { state: st, x, y, velocityX, velocityY } = e.nativeEvent;
       if (st === State.BEGAN) {
         panMovedRef.current = false;
-        if (y < surfaceScreenY()) {
+        if (y < surfaceScreenYAt(x)) {
           // 上の空間＝投擲ゾーン（カメラは触らない）
           panZoneRef.current = 'throw';
         } else {
@@ -404,15 +409,17 @@ function AddScreen({ entries, onAdd }: Props) {
         if (panMovedRef.current && st === State.END) {
           const a = areaRef.current;
           const sx = clamp(x, BALL / 2, a.w - BALL / 2);
+          // 離した位置が層に埋まる場合は表面の少し上から発射（層内すり抜け防止）。
+          const sy = Math.min(y, surfaceScreenYAt(sx) - BALL * 0.5);
           const speed = Math.hypot(velocityX, velocityY);
           if (speed > FLICK_THRESHOLD) {
             // フリック＝その方向へ投げる
             const vx = clamp(velocityX * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
             const vy = clamp(velocityY * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
-            void doLaunch(sx, y, vx, vy);
+            void doLaunch(sx, sy, vx, vy);
           } else {
             // ゆっくり離した＝その場に自由落下
-            void doLaunch(sx, y, 0, 0);
+            void doLaunch(sx, sy, 0, 0);
           }
         }
         setHeld(null);
@@ -421,7 +428,7 @@ function AddScreen({ entries, onAdd }: Props) {
         if (cameraYRef.current <= liveCam + 40) followRef.current = true;
       }
     },
-    [camBounds, doLaunch, surfaceScreenY]
+    [camBounds, doLaunch, surfaceScreenYAt]
   );
 
   const toggleDebug = useCallback(async () => {

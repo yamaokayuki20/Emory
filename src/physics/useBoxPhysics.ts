@@ -46,6 +46,8 @@ interface BoxApi {
   /** バスケ（固定ゴール）の当たり判定円 */
   setGoal: (t: { x: number; y: number; r: number } | null) => void;
   consumeGoalHit: () => { x: number; y: number } | null;
+  /** ワールドx における山の「局所表面」ワールドy（無ければ底）。生成可否判定に使う。 */
+  surfaceYAt: (x: number) => number;
 }
 
 const WALL = 80;
@@ -106,6 +108,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   // 固定済み（静的・除去済み含む）ボールの描画データ。位置不変・y昇順。
   const frozenMapRef = useRef<Map<number, BoxBall>>(new Map());
   const frozenSortedRef = useRef<BoxBall[]>([]);
+  // 列ごとの表面高さ（ワールドy）。毎フレーム更新。生成可否（層内への落下防止）に使う。
+  const colTopRef = useRef<{ tops: number[]; colW: number } | null>(null);
 
   const [balls, setBalls] = useState<BoxBall[]>([]);
   const [frozenVersion, setFrozenVersion] = useState(0);
@@ -210,6 +214,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         const top = b.position.y - m.size / 2;
         if (top < colTop[ci]) colTop[ci] = top;
       }
+      colTopRef.current = { tops: colTop, colW }; // 生成可否判定用に公開
       const freezeDepth = ballSize * ACTIVE_DEPTH_ROWS;
       const removeDepth = ballSize * (ACTIVE_DEPTH_ROWS + REMOVE_EXTRA_ROWS);
 
@@ -396,6 +401,17 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     return h;
   }, []);
 
+  // ワールドx の局所表面ワールドy。列にボールが無ければ底（GROUND_Y）。
+  const surfaceYAt = useCallback((x: number) => {
+    const c = colTopRef.current;
+    if (!c || c.tops.length === 0) return GROUND_Y;
+    let ci = Math.floor(x / c.colW);
+    if (ci < 0) ci = 0;
+    else if (ci >= c.tops.length) ci = c.tops.length - 1;
+    const t = c.tops[ci];
+    return isFinite(t) ? t : GROUND_Y;
+  }, []);
+
   return {
     balls,
     frozenSorted: frozenSortedRef.current,
@@ -410,5 +426,6 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     consumeHit,
     setGoal,
     consumeGoalHit,
+    surfaceYAt,
   };
 }
