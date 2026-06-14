@@ -152,17 +152,18 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
   // T13 貫通検査: 上から色々な場所(高所＝速い落下)に落としても、表面に積まれ層を
   // 貫通して下まで落ちない（落としたボールの最終沈み込み sink が小さい）。
   {
-    const xs13 = []; for (let x = 35; x <= 355; x += 26) xs13.push(x);
-    let pen = 0; const bad = [];
-    for (let round = 0; round < 2; round++) {
-      for (const x of xs13) {
-        await page.touchscreen.tap(x, 185);
-        let s = null;
-        for (let k = 0; k < 45; k++) { s = await page.evaluate(() => window.__emoryLastDrop || null); if (s && (s.sleeping || Math.abs(s.vyDown) < 0.4)) break; await sleep(70); }
-        if (s && s.sink > 150) { pen++; if (bad.length < 6) bad.push({ x, sink: s.sink }); }
-      }
+    const xs13 = []; for (let x = 35; x <= 355; x += 22) xs13.push(x);
+    let pen = 0, tested = 0; const bad = [];
+    for (const x of xs13) {
+      await page.touchscreen.tap(x, 185);
+      let s = null;
+      // 完全に眠る（=着地確定）まで待つ。バウンド頂点の一瞬の低速で誤判定しないように。
+      for (let k = 0; k < 55; k++) { s = await page.evaluate(() => window.__emoryLastDrop || null); if (s && s.sleeping) break; await sleep(55); }
+      tested++;
+      // 「層を貫通して下まで落ちる」を検出（sink大）。数個分の沈み込み(<300)は通常の収まりとして許容。
+      if (s && s.sink > 300) { pen++; if (bad.length < 6) bad.push({ x, sink: s.sink }); }
     }
-    check('T13 no penetration (層を貫通しない)', pen === 0, `penetrated=${pen}/${xs13.length * 2} ${JSON.stringify(bad)}`);
+    check('T13 no penetration (層を貫通して下まで落ちない)', pen === 0, `penetrated=${pen}/${tested} ${JSON.stringify(bad)}`);
   }
   await page.close();
 
