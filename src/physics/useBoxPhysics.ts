@@ -21,6 +21,7 @@ interface BallMeta {
   size: number;
   hitUfo: boolean;
   hitGoal: boolean;
+  prevY: number; // 前フレームのy（リング面の上→下クロス判定用）
 }
 
 interface Options {
@@ -97,6 +98,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   const hitRef = useRef<{ x: number; y: number } | null>(null);
   const goalRef = useRef<{ x: number; y: number; r: number } | null>(null);
   const goalHitRef = useRef<{ x: number; y: number } | null>(null);
+  // バスケのリング（リム）2点＝物理障害物。goal に毎フレーム追従。
+  const rimARef = useRef<Matter.Body | null>(null);
+  const rimBRef = useRef<Matter.Body | null>(null);
   const rafRef = useRef<number | null>(null);
   const seededRef = useRef(false);
   // 固定済み（静的・除去済み含む）ボールの描画データ。位置不変・y昇順。
@@ -163,35 +167,77 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         }
       }
 
+      // バスケのリング（リム）2点を物理障害物として goal に追従させる。
+      // 縁に当たればバウンド・中央を上から抜けた時だけスコア（下記）。
+      const goalNow = goalRef.current;
+      if (goalNow) {
+        const rimR = ballSize * 0.08;
+        if (!rimARef.current || !rimBRef.current) {
+          rimARef.current = Matter.Bodies.circle(goalNow.x - goalNow.r, goalNow.y, rimR, { isStatic: true, restitution: 0.5, friction: 0.2 });
+          rimBRef.current = Matter.Bodies.circle(goalNow.x + goalNow.r, goalNow.y, rimR, { isStatic: true, restitution: 0.5, friction: 0.2 });
+          Matter.Composite.add(engine.world, [rimARef.current, rimBRef.current]);
+        } else {
+          Matter.Body.setPosition(rimARef.current, { x: goalNow.x - goalNow.r, y: goalNow.y });
+          Matter.Body.setPosition(rimBRef.current, { x: goalNow.x + goalNow.r, y: goalNow.y });
+        }
+      } else if (rimARef.current || rimBRef.current) {
+        if (rimARef.current) Matter.Composite.remove(engine.world, rimARef.current);
+        if (rimBRef.current) Matter.Composite.remove(engine.world, rimBRef.current);
+        rimARef.current = null;
+        rimBRef.current = null;
+      }
+
       const tgt = targetRef.current;
       let activeCount = 0;
       let settledTop = Infinity;
-      const freezeLine = restTopRef.current + ballSize * ACTIVE_DEPTH_ROWS;
-      const removeLine = restTopRef.current + ballSize * (ACTIVE_DEPTH_ROWS + REMOVE_EXTRA_ROWS);
       const allBodies = Matter.Composite.allBodies(engine.world);
       // 固定は「見た目で重なっていない（中心間が見た目の径以上）」時だけ。
       // 体半径(0.44)は見た目(0.42)より大きいので、わずかな食い込みは見た目重なりにならない。
       const overlapDist2 = (ballSize * 0.84) ** 2;
+
+      // ── 列ごとの「表面の高さ」を求める（パス1）。
+      // 固定/除去の判定はこの“局所表面からの深さ”で行う。これにより斜めの山でも
+      // 表面のボールは常に当たり判定を残し（＝すり抜け防止）、深い内部だけを物理から外す。
+      const NCOL = Math.max(1, Math.round(width / ballSize));
+      const colW = width / NCOL;
+      const colTop = new Array<number>(NCOL).fill(Infinity);
+      for (const b of allBodies) {
+        const m = metaRef.current.get(b.id);
+        if (!m) continue; // 壁・地面・リム
+        let ci = Math.floor(b.position.x / colW);
+        if (ci < 0) ci = 0;
+        else if (ci >= NCOL) ci = NCOL - 1;
+        const top = b.position.y - m.size / 2;
+        if (top < colTop[ci]) colTop[ci] = top;
+      }
+      const freezeDepth = ballSize * ACTIVE_DEPTH_ROWS;
+      const removeDepth = ballSize * (ACTIVE_DEPTH_ROWS + REMOVE_EXTRA_ROWS);
+
       const dynamicRender: BoxBall[] = [];
       const toRemove: Matter.Body[] = [];
       let frozenChanged = false;
 
       for (const b of allBodies) {
         const m = metaRef.current.get(b.id);
-        if (!m) continue; // 壁・地面
+        if (!m) continue; // 壁・地面・リム
         const top = b.position.y - m.size / 2;
+        let ci = Math.floor(b.position.x / colW);
+        if (ci < 0) ci = 0;
+        else if (ci >= NCOL) ci = NCOL - 1;
+        const depth = b.position.y - colTop[ci]; // 局所表面からの深さ
 
         if (b.isStatic) {
-          // 固定済み（床帯）。位置不変。深すぎるものは物理から除去（描画は frozenMap に残る）。
+          // 固定済み（床帯）。位置不変。局所表面より十分深いものだけ物理から除去
+          // （描画は frozenMap に残る）。表面付近の固定ボールは残して当たり判定を維持。
           if (top < settledTop) settledTop = top;
-          if (b.position.y > removeLine) toRemove.push(b);
+          if (depth > removeDepth) toRemove.push(b);
           continue;
         }
 
         if (b.isSleeping) {
           if (top < settledTop) settledTop = top;
-          // 深い眠りボールは固定（重なっている間は固定しない）
-          if (b.position.y > freezeLine) {
+          // 局所表面より深い眠りボールは固定（重なっている間は固定しない）
+          if (depth > freezeDepth) {
             if (!overlapsNeighbor(b, allBodies, metaRef.current, overlapDist2)) {
               Matter.Body.setStatic(b, true);
               const fb: BoxBall = {
@@ -226,17 +272,18 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
               hitRef.current = { x: tgt.x, y: tgt.y };
             }
           }
-          // バスケ（固定ゴール）の当たり判定
+          // バスケ：リングの中央を「上から下へ」抜けた時だけスコア。
           const goal = goalRef.current;
           if (goal && !m.hitGoal) {
-            const gx = b.position.x - goal.x;
-            const gy = b.position.y - goal.y;
-            if (gx * gx + gy * gy < goal.r * goal.r) {
+            const dx = b.position.x - goal.x;
+            const crossedDown = m.prevY < goal.y && b.position.y >= goal.y; // リング面を上→下に通過
+            if (crossedDown && b.velocity.y > 0.4 && Math.abs(dx) < goal.r * 0.7) {
               m.hitGoal = true;
               goalHitRef.current = { x: goal.x, y: goal.y };
             }
           }
         }
+        m.prevY = b.position.y;
         // 動的（飛行中／上層の眠り）だけ毎フレーム描画
         dynamicRender.push({
           bodyId: b.id,
@@ -279,6 +326,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       metaRef.current.clear();
       frozenMapRef.current.clear();
       frozenSortedRef.current = [];
+      rimARef.current = null;
+      rimBRef.current = null;
     };
   }, [width]);
 
@@ -295,7 +344,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         slop: 0.002,
       });
       body.sleepThreshold = 20; // 早めに眠らせる→早く固定→動的数を抑える
-      metaRef.current.set(body.id, { emotion, variation, size: ballSize, hitUfo: false, hitGoal: false });
+      metaRef.current.set(body.id, { emotion, variation, size: ballSize, hitUfo: false, hitGoal: false, prevY: y });
       Matter.Composite.add(engine.world, body);
       return body;
     },
