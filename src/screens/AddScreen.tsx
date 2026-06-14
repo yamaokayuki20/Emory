@@ -13,13 +13,12 @@ import {
   PanGestureHandlerStateChangeEvent,
   State,
 } from 'react-native-gesture-handler';
-import Svg, { Defs, Line, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
+import Svg, { Defs, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
 
 import EmotionBall from '../components/EmotionBall';
 import EmotionPicker from '../components/EmotionPicker';
 import Fireworks from '../components/Fireworks';
 import Header from '../components/Header';
-import TrajectoryLine from '../components/TrajectoryLine';
 import { Ufo } from '../components/targets';
 import BasketHoop, { BASKET_ASPECT, BASKET_HIT } from '../components/targets/BasketHoop';
 import { useBoxPhysics, BoxBall } from '../physics/useBoxPhysics';
@@ -36,7 +35,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b36 dates';
+const BUILD = 'b37 micro';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -60,11 +59,10 @@ function visibleSlice(sorted: BoxBall[], top: number, bottom: number): BoxBall[]
   return sorted.slice(start, lo);
 }
 
-// スリンガー
-const STRETCH_MAX = 140;
-const STRETCH_K = 78;
-const STRETCH_TO_VEL = 0.14; // ×1.5
-const VEL_MAX = 11;
+// 投擲（タップ=自由落下 / フリック=投げる）
+const FLICK_THRESHOLD = 240; // px/s 以上で「投げ」、未満は「タップ＝自由落下」
+const FLICK_SCALE = 0.014;
+const FLICK_MAX = 18;
 
 // 画面内のレイアウト割合（箱はヘッダー直下のフル高さ。上部にピッカーを半透明オーバーレイ）
 const UFO_FRAC = 0.18; // UFOの表示y（ピッカーの下）
@@ -81,19 +79,12 @@ const PATROL_MS = 5200;
 const RESPAWN_MS = 2200;
 
 // 固定バスケットゴール（上部・シュート用）
-const BASKET_W = 116;
-const BASKET_LEFT = 6;
-const BASKET_TOP_FRAC = 0.135;
+const BASKET_W = 92;
+// 右端ぴったり（left は area.w から算出）
+const BASKET_TOP_FRAC = 0.12;
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
-}
-
-function tension(dx: number, dy: number) {
-  const mag = Math.hypot(dx, dy);
-  if (mag < 0.001) return { x: 0, y: 0, mag: 0 };
-  const t = STRETCH_MAX * (1 - Math.exp(-mag / STRETCH_K));
-  return { x: (dx / mag) * t, y: (dy / mag) * t, mag: t };
 }
 
 /**
@@ -174,6 +165,12 @@ function AddScreen({ entries, onAdd }: Props) {
   // スコア演出（バスケ命中）
   const [shootMsg, setShootMsg] = useState(false);
   const shootTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // マイクロインタラクションは1回1つ（ランダム選択／上部ボタンで切替）
+  const [micro, setMicro] = useState<'ufo' | 'basket'>(() => (Math.random() < 0.5 ? 'ufo' : 'basket'));
+  const microRef = useRef(micro);
+  microRef.current = micro;
+  const cycleMicro = useCallback(() => setMicro((m) => (m === 'ufo' ? 'basket' : 'ufo')), []);
 
   const { balls, frozenSorted, frozenVersion, boundaries, restTopY, activeCount, groundY, drop, seed, setTarget, consumeHit, setGoal, consumeGoalHit } =
     useBoxPhysics({ width: area.w, ballSize: BALL });
@@ -261,14 +258,14 @@ function AddScreen({ entries, onAdd }: Props) {
     return () => loop.stop();
   }, [area.w, ufoX]);
 
-  // 固定バスケットの画面ジオメトリ（スコア判定位置）
+  // 固定バスケットの画面ジオメトリ（右端ぴったり・スコア判定位置）
   const basket = useMemo(() => {
     const w = BASKET_W;
     const h = BASKET_W * BASKET_ASPECT;
-    const left = BASKET_LEFT;
+    const left = area.w - w; // 右端ぴったり
     const top = area.h * BASKET_TOP_FRAC;
     return { w, h, left, top, hitX: left + BASKET_HIT.fx * w, hitScreenY: top + BASKET_HIT.fy * h, r: BASKET_HIT.fr * w };
-  }, [area.h]);
+  }, [area.h, area.w]);
   const basketRef = useRef(basket);
   basketRef.current = basket;
 
@@ -278,7 +275,7 @@ function AddScreen({ entries, onAdd }: Props) {
     const id = ufoX.addListener(({ value }) => {
       const x = -UFO_OFF + value * (area.w + UFO_OFF * 2);
       const worldY = cameraYRef.current + area.h * UFO_FRAC;
-      if (ufoVisibleRef.current) setTarget({ x, y: worldY, r: UFO_HIT_R });
+      if (ufoVisibleRef.current && microRef.current === 'ufo') setTarget({ x, y: worldY, r: UFO_HIT_R });
       else setTarget(null);
     });
     return () => ufoX.removeListener(id);
@@ -290,10 +287,12 @@ function AddScreen({ entries, onAdd }: Props) {
     let raf = 0;
     const tick = () => {
       if (!on) return;
-      // 固定バスケのスコア判定円を毎フレーム更新（画面固定→ワールドはカメラ依存）
+      // 固定バスケのスコア判定円を毎フレーム更新（バスケ選択時のみ）
       const bk = basketRef.current;
-      if (areaRef.current.w > 0) {
+      if (areaRef.current.w > 0 && microRef.current === 'basket') {
         setGoal({ x: bk.hitX, y: cameraYRef.current + bk.hitScreenY, r: bk.r });
+      } else {
+        setGoal(null);
       }
       const h = consumeHit();
       if (h && ufoVisibleRef.current) {
@@ -336,12 +335,12 @@ function AddScreen({ entries, onAdd }: Props) {
   }, []);
 
   // スリンガー
-  const onSlingerGesture = useCallback((e: PanGestureHandlerGestureEvent) => {
+  const onReadyGesture = useCallback((e: PanGestureHandlerGestureEvent) => {
     setDrag({ x: e.nativeEvent.translationX, y: e.nativeEvent.translationY });
   }, []);
 
   const doLaunch = useCallback(
-    async (vx: number, vy: number) => {
+    async (spawnX: number, spawnScreenY: number, vx: number, vy: number) => {
       const state = await consumeThrow();
       if (!state) {
         setRemaining(0);
@@ -349,10 +348,8 @@ function AddScreen({ entries, onAdd }: Props) {
       }
       setRemaining(state.remaining);
       const entry = await onAdd(selected);
-      const a = areaRef.current;
-      const worldX = a.w / 2;
-      const worldY = cameraYRef.current + a.h * READY_FRAC;
-      drop(selected, entry.variation, worldX, worldY, vx, vy);
+      const worldY = cameraYRef.current + spawnScreenY;
+      drop(selected, entry.variation, spawnX, worldY, vx, vy);
       followRef.current = true;
       // 飛翔が見えるよう、次の待機ボールは0.5s後に出す
       setReadyVisible(false);
@@ -362,16 +359,24 @@ function AddScreen({ entries, onAdd }: Props) {
     [selected, onAdd, drop]
   );
 
-  const onSlingerState = useCallback(
+  const onReadyState = useCallback(
     (e: PanGestureHandlerStateChangeEvent) => {
-      const { state, translationX, translationY } = e.nativeEvent;
+      const { state, translationX, translationY, velocityX, velocityY } = e.nativeEvent;
       if (state !== State.END && state !== State.CANCELLED && state !== State.FAILED) return;
-      const s = tension(translationX, translationY);
-      if (state === State.END && s.mag > 18) {
-        const ux = s.x / s.mag;
-        const uy = s.y / s.mag;
-        const speed = Math.min(VEL_MAX, s.mag * STRETCH_TO_VEL);
-        void doLaunch(-ux * speed, -uy * speed);
+      if (state === State.END) {
+        const a = areaRef.current;
+        const sx = clamp(a.w / 2 + translationX, BALL / 2, a.w - BALL / 2);
+        const sy = a.h * READY_FRAC + translationY;
+        const speed = Math.hypot(velocityX, velocityY);
+        if (speed > FLICK_THRESHOLD) {
+          // フリック＝投げる
+          const vx = clamp(velocityX * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
+          const vy = clamp(velocityY * FLICK_SCALE, -FLICK_MAX, FLICK_MAX);
+          void doLaunch(sx, sy, vx, vy);
+        } else {
+          // タップ＝その場で自由落下
+          void doLaunch(sx, sy, 0, 0);
+        }
       }
       setDrag(null);
     },
@@ -408,12 +413,9 @@ function AddScreen({ entries, onAdd }: Props) {
     setRemaining(s.remaining);
   }, [unlimited]);
 
-  const stretch = useMemo(() => (drag ? tension(drag.x, drag.y) : { x: 0, y: 0, mag: 0 }), [drag]);
-  const def = getEmotion(selected);
-  const bandWidth = Math.max(1.5, 7 - stretch.mag / 26);
-
+  const dragOff = drag ?? { x: 0, y: 0 };
   const readyScreen = { x: area.w / 2, y: area.h * READY_FRAC };
-  const ballScreen = { x: readyScreen.x + stretch.x, y: readyScreen.y + stretch.y };
+  const ballScreen = { x: readyScreen.x + dragOff.x, y: readyScreen.y + dragOff.y };
 
   const ufoTranslate = ufoX.interpolate({
     inputRange: [0, 1],
@@ -433,7 +435,13 @@ function AddScreen({ entries, onAdd }: Props) {
 
   return (
     <View style={styles.screen}>
-      <Header remaining={remaining} debugUnlimited={unlimited} onToggleDebug={toggleDebug} />
+      <Header
+        remaining={remaining}
+        debugUnlimited={unlimited}
+        onToggleDebug={toggleDebug}
+        microLabel={micro === 'ufo' ? 'UFO' : 'バスケ'}
+        onCycleMicro={cycleMicro}
+      />
 
       {/* 箱（ヘッダー直下のフル高さ。上に半透明ピッカーを重ねる） */}
       <View style={styles.box} onLayout={onZoneLayout}>
@@ -466,15 +474,15 @@ function AddScreen({ entries, onAdd }: Props) {
           {boundaries.length > 0 && <Boundaries boundaries={boundaries} width={area.w} />}
         </View>
 
-        {/* 固定バスケットゴール（上部・シュート用） */}
-        {area.w > 0 && (
+        {/* 固定バスケットゴール（バスケ選択時のみ・右端ぴったり） */}
+        {area.w > 0 && micro === 'basket' && (
           <View style={{ position: 'absolute', left: basket.left, top: basket.top }} pointerEvents="none">
             <BasketHoop width={basket.w} />
           </View>
         )}
 
-        {/* UFO（飛行ターゲット） */}
-        {area.w > 0 && ufoVisible && (
+        {/* UFO（UFO選択時のみ・飛行） */}
+        {area.w > 0 && micro === 'ufo' && ufoVisible && (
           <Animated.View
             style={[styles.ufo, { top: area.h * UFO_FRAC - UFO_SIZE * 0.35, width: UFO_SIZE, transform: [{ translateX: ufoTranslate }] }]}
             pointerEvents="none"
@@ -493,30 +501,19 @@ function AddScreen({ entries, onAdd }: Props) {
           </View>
         )}
 
-        {/* 張力帯＋予測軌道 */}
-        {drag && area.w > 0 && (
-          <>
-            <Svg width={area.w} height={area.h} style={styles.overlay} pointerEvents="none">
-              <Line x1={readyScreen.x - 13} y1={readyScreen.y} x2={ballScreen.x} y2={ballScreen.y} stroke={def.color} strokeWidth={bandWidth} strokeLinecap="round" opacity={0.55} />
-              <Line x1={readyScreen.x + 13} y1={readyScreen.y} x2={ballScreen.x} y2={ballScreen.y} stroke={def.color} strokeWidth={bandWidth} strokeLinecap="round" opacity={0.55} />
-            </Svg>
-            <TrajectoryLine width={area.w} height={area.h} from={readyScreen} pull={{ x: stretch.x, y: stretch.y }} color={def.color} />
-          </>
-        )}
-
         {/* ヒント */}
         {!drag && readyVisible && (
           <View style={styles.hint} pointerEvents="none">
             <Svg width={18} height={12} viewBox="0 0 18 12">
               <Path d="M3 9 L9 3 L15 9" stroke={text.faint} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" />
             </Svg>
-            <Text style={styles.hintText}>引いて離して箱に入れる</Text>
+            <Text style={styles.hintText}>タップで落とす・フリックで投げる</Text>
           </View>
         )}
 
         {/* 待機ボール（スリンガー）。投擲直後の0.5sは出さない */}
         {area.w > 0 && readyVisible && (
-          <PanGestureHandler onGestureEvent={onSlingerGesture} onHandlerStateChange={onSlingerState}>
+          <PanGestureHandler onGestureEvent={onReadyGesture} onHandlerStateChange={onReadyState}>
             <View style={[styles.ready, { left: ballScreen.x - BALL / 2, top: ballScreen.y - BALL / 2, width: BALL, height: BALL }]}>
               <EmotionBall emotion={selected} variation={0} size={BALL} shadow />
             </View>

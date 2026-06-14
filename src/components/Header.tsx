@@ -10,6 +10,9 @@ interface Props {
   /** デバッグ: 投擲制限の解除状態 */
   debugUnlimited?: boolean;
   onToggleDebug?: () => void;
+  /** 現在のマイクロインタラクション表示＋切替 */
+  microLabel?: string;
+  onCycleMicro?: () => void;
   onPressCalendar?: () => void;
   onPressMenu?: () => void;
 }
@@ -19,7 +22,7 @@ interface Props {
  * 左: シンプルな顔アイコン / 中央: アプリ名「エモリー」/ 右: カレンダー・メニュー
  * 残り投擲数は右肩に控えめなドットで表示。
  */
-function Header({ remaining, debugUnlimited, onToggleDebug, onPressCalendar, onPressMenu }: Props) {
+function Header({ remaining, debugUnlimited, onToggleDebug, microLabel, onCycleMicro, onPressCalendar, onPressMenu }: Props) {
   return (
     <View style={styles.wrap}>
       <View style={styles.bar}>
@@ -34,6 +37,11 @@ function Header({ remaining, debugUnlimited, onToggleDebug, onPressCalendar, onP
         </View>
 
         <View style={styles.right}>
+          {onCycleMicro && (
+            <Pressable hitSlop={8} onPress={onCycleMicro} style={styles.microBtn}>
+              <Text style={styles.microTxt}>演出: {microLabel} ↻</Text>
+            </Pressable>
+          )}
           {onToggleDebug && (
             <Pressable
               hitSlop={8}
@@ -124,6 +132,20 @@ const styles = StyleSheet.create({
   },
   debugTxtOn: {
     color: '#FFFFFF',
+  },
+  microBtn: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: bg.line,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    marginRight: 2,
+  },
+  microTxt: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: text.secondary,
+    letterSpacing: 0.3,
   },
 });
 
