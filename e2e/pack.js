@@ -224,6 +224,24 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
   }
   await bp.close();
 
+  // T16 すり抜け(不揃いな表面): 偏った・凸凹な山を作り、表面の各所へ落としても潜り込まない。
+  // 落としたボールが他のボールの「真下」に潜る(cover大)＝表面の無物理層をすり抜けた証拠。
+  {
+    const tp = await newPage(browser, true, errors);
+    const ld = () => tp.evaluate(() => window.__emoryLastDrop || null);
+    const settle = async () => { for (let k = 0; k < 50; k++) { const s = await ld(); if (s && s.sleeping) return s; await sleep(55); } return await ld(); };
+    for (const x of [70, 70, 70, 110, 150, 150, 230, 300, 90, 130, 190, 250, 320, 90, 70, 150]) { await tp.touchscreen.tap(x, 200); await sleep(150); }
+    await sleep(2500);
+    let slip = 0; const bad = [];
+    for (let x = 50; x <= 340; x += 18) {
+      await tp.touchscreen.tap(x, 190);
+      const s = await settle();
+      if (s && s.cover >= 3) { slip++; if (bad.length < 8) bad.push({ x, cover: s.cover, sink: s.sink }); }
+    }
+    await tp.close();
+    check('T16 すり抜け: 凸凹な表面でも潜り込まない', slip === 0, `slipped=${slip} ${JSON.stringify(bad)}`);
+  }
+
   check('T12 no console/page errors', errors.length === 0, errors.slice(0, 4).join(' | '));
 
   await browser.close();
