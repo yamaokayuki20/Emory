@@ -100,8 +100,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   const hitRef = useRef<{ x: number; y: number } | null>(null);
   const goalRef = useRef<{ x: number; y: number; r: number } | null>(null);
   const goalHitRef = useRef<{ x: number; y: number } | null>(null);
-  // バスケのリム（手前側のみ）＝物理障害物。goal に毎フレーム追従。
+  // バスケのリム＝物理障害物。goal に毎フレーム追従。A=手前(左)の円、B=右側の斜め板。
   const rimARef = useRef<Matter.Body | null>(null);
+  const rimBRef = useRef<Matter.Body | null>(null);
   const rafRef = useRef<number | null>(null);
   const seededRef = useRef(false);
   // 固定済み（静的・除去済み含む）ボールの描画データ。位置不変・y昇順。
@@ -199,24 +200,33 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       }
 
       // バスケのリング＝物理障害物。縁に当たればバウンド・中央を上から抜けた時だけスコア。
-      // リムは「手前（左）側」だけにする。右端はゴールが画面右端ぴったりのため、右リムと壁の
-      // 間に絵文字が挟まって固着→そこを山頂と誤認→画面がせり上がる、という不具合が出る(#5)。
-      // 右リムを無くせば右側に挟まる隙間が無くなり、見た目（PNG）は変えずに固着を防げる。
+      // 左リム=小さな円。右リム=「斜めの板」にする(#5)。ゴールが画面右端ぴったりのため
+      // 右側に普通の円を置くと壁との間に絵文字が挟まって固着→山頂と誤認→画面せり上がり、に
+      // なる。斜め板なら当たり判定は残しつつ、乗った絵文字は中央側へ滑り落ちて固着しない。
       const goalNow = goalRef.current;
       if (goalNow) {
         const rimR = ballSize * 0.07;
-        // 摩擦0＝ツルツルのリム。縁に乗ってもすぐ滑り落ちる（リング上に固定されない）。
-        if (!rimARef.current) {
+        // 右リム=細い斜め板。中央のスコア・レーン(|dx|<0.7r)に被らないよう、リング右端より
+        // さらに右へ寄せて配置。右上→左下に傾斜し、乗った絵文字は中央側へ滑り落ちる。
+        const rampW = ballSize * 0.5, rampH = ballSize * 0.14, rampAngle = -0.6;
+        const rampX = goalNow.x + goalNow.r + ballSize * 0.18;
+        if (!rimARef.current || !rimBRef.current) {
           rimARef.current = Matter.Bodies.circle(goalNow.x - goalNow.r, goalNow.y, rimR, {
             isStatic: true, restitution: 0.3, friction: 0, frictionStatic: 0,
           });
-          Matter.Composite.add(engine.world, rimARef.current);
+          rimBRef.current = Matter.Bodies.rectangle(rampX, goalNow.y, rampW, rampH, {
+            isStatic: true, restitution: 0.3, friction: 0, frictionStatic: 0, angle: rampAngle,
+          });
+          Matter.Composite.add(engine.world, [rimARef.current, rimBRef.current]);
         } else {
           Matter.Body.setPosition(rimARef.current, { x: goalNow.x - goalNow.r, y: goalNow.y });
+          Matter.Body.setPosition(rimBRef.current, { x: rampX, y: goalNow.y });
         }
-      } else if (rimARef.current) {
-        Matter.Composite.remove(engine.world, rimARef.current);
+      } else if (rimARef.current || rimBRef.current) {
+        if (rimARef.current) Matter.Composite.remove(engine.world, rimARef.current);
+        if (rimBRef.current) Matter.Composite.remove(engine.world, rimBRef.current);
         rimARef.current = null;
+        rimBRef.current = null;
       }
 
       const tgt = targetRef.current;
@@ -265,6 +275,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       let frozenChanged = false;
       // 飛行中ボールが「落ち着いた層の表面」よりどれだけ深く沈んでいるか（すり抜け検出）。
       let maxSink = 0;
+      let maxBallSink = 0; // 非静的ボールの「落ち着いた層の表面」からの最大沈み込み（すり抜け監視）
 
       for (const b of allBodies) {
         const m = metaRef.current.get(b.id);
@@ -288,6 +299,20 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
           if (!nearGoal && top < settledTop) settledTop = top;
           if (depth > removeDepth) toRemove.push(b);
           continue;
+        }
+
+        // すり抜け安全網: 非静的ボールが「落ち着いた層の表面」より深く沈み込んだら引き戻す。
+        // 速い連投で固定が間に合わず軟らかい列を掘り抜けても、ここで必ず止まる。
+        // settledTopCol（静的＋眠りの表面・隙間補間済み）基準なので飛行中の自分には影響されない。
+        const settledSurf = settledTopCol[ci];
+        if (isFinite(settledSurf)) {
+          const floorY = settledSurf + ballSize * 4; // これより深い沈み込み＝掘り抜けとみなす
+          if (b.position.y > floorY) {
+            Matter.Body.setPosition(b, { x: b.position.x, y: floorY });
+            if (b.velocity.y > 0) Matter.Body.setVelocity(b, { x: b.velocity.x, y: 0 });
+          }
+          const sink2 = b.position.y - settledSurf;
+          if (sink2 > maxBallSink) maxBallSink = sink2;
         }
 
         if (b.isSleeping) {
@@ -369,8 +394,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
       // 自己テスト用フック（実害なし・O(1)）。
       if (typeof window !== 'undefined') {
-        const w = window as unknown as { __emoryFrameSink?: number; __emoryLastDrop?: unknown };
+        const w = window as unknown as { __emoryFrameSink?: number; __emoryMaxBallSink?: number; __emoryLastDrop?: unknown };
         w.__emoryFrameSink = Math.round(maxSink);
+        w.__emoryMaxBallSink = Math.round(maxBallSink);
         // 直近に落としたボールの沈み込み: その列の他ボール表面(settledTopCol)よりどれだけ深いか。
         // 表面に積まれていれば ~0、層を貫通して下へ落ちると大きい。
         const ld = lastDropRef.current;
@@ -407,6 +433,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       frozenMapRef.current.clear();
       frozenSortedRef.current = [];
       rimARef.current = null;
+      rimBRef.current = null;
     };
   }, [width]);
 

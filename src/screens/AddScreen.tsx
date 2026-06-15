@@ -37,7 +37,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b45 goal';
+const BUILD = 'b46 rim';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -73,8 +73,8 @@ const FLICK_MAX = 30;
 const UFO_FRAC = 0.18; // UFOの表示y（ピッカーの下）
 // 山は基本固定。積み上がって上端がこの線より高くなった時だけ、ゆっくり「下げる」。
 // 自動で上げる（せり上がる）挙動はしない。
-const TOP_LIMIT_FRAC = 0.45; // 上端がこれより上に来たら下げ補正発動
-const TARGET_FRAC = 0.6; // 山の上面の既定位置（画面の下寄り＝投擲スペースを広く）
+const TOP_LIMIT_FRAC = 0.56; // 上端がこれより上に来たら下げ補正発動
+const TARGET_FRAC = 0.74; // 山の上面の既定位置（画面のかなり下寄り＝投擲スペースを広く）
 
 const UFO_SIZE = 58;
 const UFO_OFF = 70;

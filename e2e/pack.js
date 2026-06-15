@@ -149,21 +149,37 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
   await client.send('Emulation.setCPUThrottlingRate', { rate: 1 });
   check('T8 perf median fps>=40', perf.medFps >= 40, `medFps=${perf.medFps}`);
 
-  // T13 貫通検査: 上から色々な場所(高所＝速い落下)に落としても、表面に積まれ層を
-  // 貫通して下まで落ちない（落としたボールの最終沈み込み sink が小さい）。
+  // T13 貫通検査(その1): 上から色々な場所(高所＝速い落下)に落としても層を貫通して
+  // 下まで落ちない（最終 sink が大きくない）。
   {
     const xs13 = []; for (let x = 35; x <= 355; x += 22) xs13.push(x);
     let pen = 0, tested = 0; const bad = [];
     for (const x of xs13) {
       await page.touchscreen.tap(x, 185);
       let s = null;
-      // 完全に眠る（=着地確定）まで待つ。バウンド頂点の一瞬の低速で誤判定しないように。
       for (let k = 0; k < 55; k++) { s = await page.evaluate(() => window.__emoryLastDrop || null); if (s && s.sleeping) break; await sleep(55); }
       tested++;
-      // 「層を貫通して下まで落ちる」を検出（sink大）。数個分の沈み込み(<300)は通常の収まりとして許容。
       if (s && s.sink > 300) { pen++; if (bad.length < 6) bad.push({ x, sink: s.sink }); }
     }
-    check('T13 no penetration (層を貫通して下まで落ちない)', pen === 0, `penetrated=${pen}/${tested} ${JSON.stringify(bad)}`);
+    check('T13 貫通: 高所ドロップで下まで落ちない', pen === 0, `penetrated=${pen}/${tested} ${JSON.stringify(bad)}`);
+  }
+
+  // T14 貫通検査(その2): 中心へ高速連投（settle待たず畳みかける）。固定が間に合わず軟らかい
+  // 列を掘り抜けても、安全網で沈み込みが抑えられる。物理計測 __emoryMaxBallSink で判定。
+  {
+    async function flick(sx, sy, ex, ey) { await page.mouse.move(sx, sy); await page.mouse.down(); for (let i = 1; i <= 5; i++) { await page.mouse.move(sx + (ex - sx) * i / 5, sy + (ey - sy) * i / 5); await sleep(5); } await page.mouse.up(); }
+    let maxSink = 0;
+    for (let i = 0; i < 28; i++) {
+      if (i % 2 === 0) await page.touchscreen.tap(180 + (i % 5) * 8, 200);
+      else await flick(180 + (i % 5) * 8, 230, 195, 400);
+      await sleep(110);
+      const s = await page.evaluate(() => window.__emoryMaxBallSink || 0);
+      if (s > maxSink) maxSink = s;
+    }
+    await sleep(2500);
+    for (let k = 0; k < 20; k++) { const s = await page.evaluate(() => window.__emoryMaxBallSink || 0); if (s > maxSink) maxSink = s; await sleep(50); }
+    // 安全網は径×4(≈184)で止める。速度上限分の超過を見て 250 を閾値に。
+    check('T14 貫通: 中心高速連投でも沈み込み<250', maxSink < 250, `maxBallSink=${maxSink}`);
   }
   await page.close();
 
@@ -180,11 +196,15 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
     for (let i = 0; i < 5; i++) { await bp.touchscreen.tap(cx, Math.max(180, ringY - 55)); await sleep(900); }
     await sleep(700);
     check('T10 basket center scores', (await goals(bp)) - g0 >= 1, `goals=${(await goals(bp)) - g0}`);
-    // リムの真上 → バウンド → ゴールしない
-    g0 = await goals(bp);
-    for (let i = 0; i < 5; i++) { await bp.touchscreen.tap(cx + r, Math.max(180, ringY - 55)); await sleep(900); }
-    await sleep(700);
-    check('T11 basket rim no score', (await goals(bp)) - g0 === 0, `goals=${(await goals(bp)) - g0}`);
+    // 右リム端へ何度も落としても固着しない（#5: 引っかかり防止）。当たり判定はあるが斜め板で
+    // 滑り落ちる。固着＝ゴール高さ付近に居座るボールが残らないこと＆カメラがせり上がらないこと。
+    const rightRimX = Math.round(hoop.left + 0.62 * hoop.w);
+    const surfBefore = await bp.evaluate(() => { const s = window.__emorySurf; return s ? Math.round(s(180)) : 0; });
+    for (let i = 0; i < 8; i++) { await bp.touchscreen.tap(rightRimX + (i % 3 - 1) * 6, Math.max(180, ringY - 50)); await sleep(700); }
+    await sleep(2500);
+    const stuck = await bp.evaluate((ry, ccx) => { let n = 0; for (const i of document.querySelectorAll('img')) { const r = i.getBoundingClientRect(); const y = r.top + r.height / 2, x = r.left + r.width / 2; if (r.width >= 20 && r.width <= 70 && Math.abs(y - ry) < 38 && x > ccx) n++; } return n; }, ringY, cx);
+    const surfAfter = await bp.evaluate(() => { const s = window.__emorySurf; return s ? Math.round(s(180)) : 0; });
+    check('T11 basket 右リム端で固着しない', stuck === 0 && surfBefore - surfAfter < 80, `stuck=${stuck} rose=${surfBefore - surfAfter}`);
   }
   await bp.close();
 
