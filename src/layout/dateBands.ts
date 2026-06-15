@@ -96,6 +96,7 @@ export function computeDateBandedPile(entries: EmotionEntry[], opts: BandOptions
 
   const placements: BandedPlacement[] = [];
   const boundaries: DateBoundary[] = [];
+  const allBodies: Matter.Body[] = []; // 全ボディ（最終的に重なり無く落ち着かせてから記録）
   let pileTop = groundY; // 現在の山の上端（次の日はこの上に落とす）
 
   groups.forEach((g, gi) => {
@@ -116,18 +117,19 @@ export function computeDateBandedPile(entries: EmotionEntry[], opts: BandOptions
         density: 0.001,
         slop: 0.003,
       });
-      (body as unknown as { _e: EmotionEntry })._e = e;
+      (body as unknown as { _e: EmotionEntry; _key: string })._e = e;
+      (body as unknown as { _e: EmotionEntry; _key: string })._key = g.key;
       dayBodies.push(body);
+      allBodies.push(body);
       Matter.Composite.add(engine.world, body);
     });
     for (let s = 0; s < stepsPerDay; s++) Matter.Engine.update(engine, 16);
 
-    // この日のボール位置を記録＋上面サンプリング
+    // この日の上面をサンプリング（境界の点線用）。配置(placements)はすべての日を積んでから
+    // 最終位置で記録する（後続の日が前の日を押し込んで重なるのを避けるため）。
     const bucketTop: number[] = new Array(NB).fill(NaN);
     let dayTop = pileTop;
     dayBodies.forEach((b) => {
-      const e = (b as unknown as { _e: EmotionEntry })._e;
-      placements.push({ emotion: e.emotion, variation: e.variation, x: b.position.x, y: b.position.y, dateKey: g.key });
       const top = b.position.y - r;
       if (top < dayTop) dayTop = top;
       const bi = Math.max(0, Math.min(NB - 1, Math.floor(b.position.x / bucketW)));
@@ -156,8 +158,43 @@ export function computeDateBandedPile(entries: EmotionEntry[], opts: BandOptions
     }
   });
 
+  // 全日を積んだ後、しっかり settle。
+  for (let s = 0; s < 160; s++) Matter.Engine.update(engine, 16);
+
+  // 仕上げに「重力なしの純粋デペネトレーション」で重なりを完全に解消する。
+  // 重力ありのままだと押し離しても次のステップで再圧縮されて重なりが残るため、
+  // ここでは Engine.update を回さず、近接ペアを押し離す緩和だけを反復して収束させる。
+  const minSep = 2 * r + 1; // 体半径×2（=接触）＋1px。これより近ければ押し離す。
+  for (let it = 0; it < 60; it++) {
+    let moved = false;
+    for (let a = 0; a < allBodies.length; a++) {
+      for (let b = a + 1; b < allBodies.length; b++) {
+        const A = allBodies[a], B = allBodies[b];
+        const dx = B.position.x - A.position.x, dy = B.position.y - A.position.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+        const ov = minSep - dist;
+        if (ov <= 0.2) continue;
+        const nx = dx / dist, ny = dy / dist, p = ov * 0.5;
+        Matter.Body.setPosition(A, { x: A.position.x - nx * p, y: A.position.y - ny * p });
+        Matter.Body.setPosition(B, { x: B.position.x + nx * p, y: B.position.y + ny * p });
+        moved = true;
+      }
+    }
+    // x を箱内に収め直す
+    for (const b of allBodies) Matter.Body.setPosition(b, { x: Math.max(minX, Math.min(maxX, b.position.x)), y: b.position.y });
+    if (!moved) break;
+  }
+
+  // 最終位置で配置を記録（重なり解消後）。topY も最終位置から再計算。
+  let topY = groundY;
+  for (const b of allBodies) {
+    const m = b as unknown as { _e: EmotionEntry; _key: string };
+    placements.push({ emotion: m._e.emotion, variation: m._e.variation, x: b.position.x, y: b.position.y, dateKey: m._key });
+    if (b.position.y - r < topY) topY = b.position.y - r;
+  }
+
   Matter.World.clear(engine.world, false);
   Matter.Engine.clear(engine);
 
-  return { placements, boundaries, topY: pileTop };
+  return { placements, boundaries, topY };
 }

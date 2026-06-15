@@ -124,10 +124,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     const engine = Matter.Engine.create();
     engine.enableSleeping = true;
     engine.gravity.y = 1.0;
-    // 衝突解決の反復。速度上限＋固定ステップで強い衝突が無くなったので、固定層を厚く
-    // 持つ分は反復を控えめにして性能を確保（食い込みはデペネトレーションでも解消）。
-    engine.positionIterations = 12;
-    engine.velocityIterations = 8;
+    // 衝突解決の反復はしっかり（食い込み＝重なりを残さない）。
+    engine.positionIterations = 18;
+    engine.velocityIterations = 12;
     engineRef.current = engine;
 
     const ground = Matter.Bodies.rectangle(width / 2, GROUND_Y + 40, width + WALL * 2, 80, { isStatic: true });
@@ -188,7 +187,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         if (overlap <= 0) continue;
         const nx = dx / dist;
         const ny = dy / dist;
-        const push = overlap * 0.6; // ゆるく（数フレームで解消）
+        const push = overlap * 0.6; // ゆるく（数フレームで解消。強すぎると下のボールを押し込む）
         if (!a.isStatic && !b.isStatic) {
           Matter.Body.translate(a, { x: -nx * push * 0.5, y: -ny * push * 0.5 });
           Matter.Body.translate(b, { x: nx * push * 0.5, y: ny * push * 0.5 });
@@ -301,18 +300,18 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
           continue;
         }
 
-        // すり抜け安全網: 非静的ボールが「落ち着いた層の表面」より深く沈み込んだら引き戻す。
-        // 速い連投で固定が間に合わず軟らかい列を掘り抜けても、ここで必ず止まる。
-        // settledTopCol（静的＋眠りの表面・隙間補間済み）基準なので飛行中の自分には影響されない。
+        // すり抜け安全網（限定版）: 「飛行中(=眠っていない)」かつ「落ち着いた層の表面より
+        // 物理層の底(removeDepth)を超えて深い」ボールだけ引き戻す。眠っている/落ち着いた
+        // ボールには触れないので、山を潰さない（=以前の増殖・重なりを起こさない）。
+        // 速い連投で軟らかい列を掘り抜けても、除去層へ落ちる前にここで止まる。
         const settledSurf = settledTopCol[ci];
         if (isFinite(settledSurf)) {
-          const floorY = settledSurf + ballSize * 4; // これより深い沈み込み＝掘り抜けとみなす
-          if (b.position.y > floorY) {
-            Matter.Body.setPosition(b, { x: b.position.x, y: floorY });
-            if (b.velocity.y > 0) Matter.Body.setVelocity(b, { x: b.velocity.x, y: 0 });
-          }
           const sink2 = b.position.y - settledSurf;
           if (sink2 > maxBallSink) maxBallSink = sink2;
+          if (!b.isSleeping && sink2 > removeDepth) {
+            Matter.Body.setPosition(b, { x: b.position.x, y: settledSurf + removeDepth });
+            if (b.velocity.y > 0) Matter.Body.setVelocity(b, { x: b.velocity.x, y: 0 });
+          }
         }
 
         if (b.isSleeping) {
@@ -442,7 +441,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       const engine = engineRef.current;
       if (!engine) return;
       const body = Matter.Bodies.circle(x, y, ballSize * 0.44, {
-        restitution: 0.05, // ほぼ弾まない＝着地時に周囲を揺らしにくい（生成時のちらつき抑制）
+        restitution: 0.08, // 弱め（着地で周囲を揺らしにくい）。0に近すぎると重なりが残るので少し残す
         friction: 0.7,
         frictionStatic: 1.0,
         frictionAir: 0.012,
