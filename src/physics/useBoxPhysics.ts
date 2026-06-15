@@ -100,9 +100,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   const hitRef = useRef<{ x: number; y: number } | null>(null);
   const goalRef = useRef<{ x: number; y: number; r: number } | null>(null);
   const goalHitRef = useRef<{ x: number; y: number } | null>(null);
-  // バスケのリング（リム）2点＝物理障害物。goal に毎フレーム追従。
+  // バスケのリム（手前側のみ）＝物理障害物。goal に毎フレーム追従。
   const rimARef = useRef<Matter.Body | null>(null);
-  const rimBRef = useRef<Matter.Body | null>(null);
   const rafRef = useRef<number | null>(null);
   const seededRef = useRef(false);
   // 固定済み（静的・除去済み含む）ボールの描画データ。位置不変・y昇順。
@@ -151,7 +150,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     // matter は CCD 非対応のため、1ステップ移動量(velocity)がボール径に近いと積層の隙間を
     // 飛び越えて貫通する。総移動量をボール径の〜1/5に制限すると、必ずどこかに接触して
     // 表面に積まれる（実測で安定して貫通0）。投擲はこの上限内で勢いを付ける。
-    const VMAX = ballSize * 0.16; // ≈7.4px/step
+    const VMAX = ballSize * 0.18; // ≈8.3px/step（少し速く。貫通しない範囲の上限付近）
     const VMAX2 = VMAX * VMAX;
     // 固定タイムステップ。matter は correction=delta/lastDelta で前回比に速度を伸縮させる
     // ため、可変フレーム間隔だと移動量がスパイクして貫通する。常に一定にして correction≈1。
@@ -199,26 +198,25 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         }
       }
 
-      // バスケのリング（リム）2点を物理障害物として goal に追従させる。
-      // 縁に当たればバウンド・中央を上から抜けた時だけスコア（下記）。
+      // バスケのリング＝物理障害物。縁に当たればバウンド・中央を上から抜けた時だけスコア。
+      // リムは「手前（左）側」だけにする。右端はゴールが画面右端ぴったりのため、右リムと壁の
+      // 間に絵文字が挟まって固着→そこを山頂と誤認→画面がせり上がる、という不具合が出る(#5)。
+      // 右リムを無くせば右側に挟まる隙間が無くなり、見た目（PNG）は変えずに固着を防げる。
       const goalNow = goalRef.current;
       if (goalNow) {
         const rimR = ballSize * 0.07;
-        // 摩擦0＝ツルツルのリム。縁に乗ってもすぐ滑り落ちる（リング上に固定されない／#5）。
-        if (!rimARef.current || !rimBRef.current) {
-          const opt = { isStatic: true, restitution: 0.3, friction: 0, frictionStatic: 0 };
-          rimARef.current = Matter.Bodies.circle(goalNow.x - goalNow.r, goalNow.y, rimR, opt);
-          rimBRef.current = Matter.Bodies.circle(goalNow.x + goalNow.r, goalNow.y, rimR, opt);
-          Matter.Composite.add(engine.world, [rimARef.current, rimBRef.current]);
+        // 摩擦0＝ツルツルのリム。縁に乗ってもすぐ滑り落ちる（リング上に固定されない）。
+        if (!rimARef.current) {
+          rimARef.current = Matter.Bodies.circle(goalNow.x - goalNow.r, goalNow.y, rimR, {
+            isStatic: true, restitution: 0.3, friction: 0, frictionStatic: 0,
+          });
+          Matter.Composite.add(engine.world, rimARef.current);
         } else {
           Matter.Body.setPosition(rimARef.current, { x: goalNow.x - goalNow.r, y: goalNow.y });
-          Matter.Body.setPosition(rimBRef.current, { x: goalNow.x + goalNow.r, y: goalNow.y });
         }
-      } else if (rimARef.current || rimBRef.current) {
-        if (rimARef.current) Matter.Composite.remove(engine.world, rimARef.current);
-        if (rimBRef.current) Matter.Composite.remove(engine.world, rimBRef.current);
+      } else if (rimARef.current) {
+        Matter.Composite.remove(engine.world, rimARef.current);
         rimARef.current = null;
-        rimBRef.current = null;
       }
 
       const tgt = targetRef.current;
@@ -276,17 +274,24 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         if (ci < 0) ci = 0;
         else if (ci >= NCOL) ci = NCOL - 1;
         const depth = b.position.y - colTop[ci]; // 局所表面からの深さ
+        // ゴール周辺で止まっているボールは「山頂(restTop)」に数えない。さもないと、リム上の
+        // 1個を山頂と誤認してカメラがせり上がる。restTop は実際の山のためだけに使う。
+        const goalC = goalRef.current;
+        const nearGoal =
+          goalC != null &&
+          Math.abs(b.position.y - goalC.y) < ballSize * 1.8 &&
+          Math.abs(b.position.x - goalC.x) < goalC.r + ballSize;
 
         if (b.isStatic) {
           // 固定済み（床帯）。位置不変。局所表面より十分深い（厚い固定層の下）ものだけ
           // 物理から除去（描画は frozenMap に残る）。固定層を厚く保ち、貫通を防ぐ。
-          if (top < settledTop) settledTop = top;
+          if (!nearGoal && top < settledTop) settledTop = top;
           if (depth > removeDepth) toRemove.push(b);
           continue;
         }
 
         if (b.isSleeping) {
-          if (top < settledTop) settledTop = top;
+          if (!nearGoal && top < settledTop) settledTop = top;
           // 局所表面より深い眠りボールは固定（重なっている間は固定しない＝固定層を綺麗に保つ）。
           if (depth > freezeDepth) {
             if (!overlapsNeighbor(b, allBodies, metaRef.current, overlapDist2)) {
@@ -379,8 +384,11 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       // 配列再確保なし。版だけ進めて変化を通知（消費側は frozenVersion を依存に）。
       if (frozenChanged) setFrozenVersion((v) => v + 1);
 
-      // 動的が居る間だけ動的層を更新（アイドル時は再描画しない）
-      if (activeCount > 0 || prevActive !== 0) {
+      // 動的層を更新する条件: 動いている / 直前まで動いていた / このフレームで固定が起きた。
+      // 固定が起きたら同フレームで動的層からも除く（＝固定層へ原子的に移す）。これをしないと
+      // アイドル中に固定したボールの“古いコピー”が動的層に残り、次の生成時にまとめて
+      // 更新されてカクッとずれる＝「生成した瞬間に数個ちらつく」原因になる。
+      if (activeCount > 0 || prevActive !== 0 || frozenChanged) {
         setBalls(dynamicRender);
         setMeta({ restTopY: restTopRef.current, activeCount });
       }
@@ -399,7 +407,6 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       frozenMapRef.current.clear();
       frozenSortedRef.current = [];
       rimARef.current = null;
-      rimBRef.current = null;
     };
   }, [width]);
 
