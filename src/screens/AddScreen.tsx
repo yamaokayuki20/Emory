@@ -37,7 +37,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b44 tune';
+const BUILD = 'b45 goal';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
