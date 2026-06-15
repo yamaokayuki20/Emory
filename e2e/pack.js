@@ -159,9 +159,11 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
       let s = null;
       for (let k = 0; k < 55; k++) { s = await page.evaluate(() => window.__emoryLastDrop || null); if (s && s.sleeping) break; await sleep(55); }
       tested++;
-      if (s && s.sink > 300) { pen++; if (bad.length < 6) bad.push({ x, sink: s.sink }); }
+      // 物理層の底(removeDepth≈552)より下＝除去層へ落ちた＝本物の貫通。谷へ転がり込んだ
+      // 数個分の深さは誤検出になるため、しきい値は層の底＋余裕(620)に置く。
+      if (s && s.sink > 620) { pen++; if (bad.length < 6) bad.push({ x, sink: s.sink }); }
     }
-    check('T13 貫通: 高所ドロップで下まで落ちない', pen === 0, `penetrated=${pen}/${tested} ${JSON.stringify(bad)}`);
+    check('T13 貫通: 高所ドロップで層の底まで落ちない', pen === 0, `penetrated=${pen}/${tested} ${JSON.stringify(bad)}`);
   }
 
   // T14 貫通検査(その2): 中心へ高速連投（settle待たず畳みかける）。固定が間に合わず軟らかい
@@ -178,8 +180,22 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
     }
     await sleep(2500);
     for (let k = 0; k < 20; k++) { const s = await page.evaluate(() => window.__emoryMaxBallSink || 0); if (s > maxSink) maxSink = s; await sleep(50); }
-    // 安全網は径×4(≈184)で止める。速度上限分の超過を見て 250 を閾値に。
-    check('T14 貫通: 中心高速連投でも沈み込み<250', maxSink < 250, `maxBallSink=${maxSink}`);
+    // 安全網は物理層の底(removeDepth≈552)で止める。これより下＝除去層へ落ちた＝本物の貫通。
+    check('T14 貫通: 中心高速連投でも層の底を抜けない', maxSink < 620, `maxBallSink=${maxSink}`);
+  }
+
+  // T15 重なり検査: シード(初期)の山に、ボール同士が見た目で重なっていないか。
+  // 中心間距離が見た目の径×0.75 未満を「明確な重なり」とする。新ページで純粋なシードを測る。
+  {
+    const sp = await newPage(browser, false, errors);
+    const seedM = await sp.evaluate(() => {
+      const B = []; for (const i of document.querySelectorAll('img')) { const r = i.getBoundingClientRect(); if (r.width >= 20 && r.width <= 70) B.push([r.left + r.width / 2, r.top + r.height / 2]); }
+      let clear = 0, minD = 1e9; const D = 46;
+      for (let a = 0; a < B.length; a++) { let nd = 1e9; for (let b = 0; b < B.length; b++) { if (a === b) continue; const d = Math.hypot(B[a][0] - B[b][0], B[a][1] - B[b][1]); if (d < nd) nd = d; } if (nd < minD) minD = nd; if (nd < D * 0.75) clear++; }
+      return { n: B.length, clearOverlap: clear, minDist: Math.round(minD) };
+    });
+    await sp.close();
+    check('T15 重なり: シードの山に明確な重なりが無い', seedM.clearOverlap <= 1, `clearOverlap=${seedM.clearOverlap}/${seedM.n} minDist=${seedM.minDist}`);
   }
   await page.close();
 
