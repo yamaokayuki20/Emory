@@ -37,7 +37,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b49 slip';
+const BUILD = 'b50 hint';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -556,14 +556,6 @@ function AddScreen({ entries, onAdd }: Props) {
           </View>
         )}
 
-        {/* ヒント */}
-        <View style={styles.hint} pointerEvents="none">
-          <Svg width={18} height={12} viewBox="0 0 18 12">
-            <Path d="M3 9 L9 3 L15 9" stroke={text.faint} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-          </Svg>
-          <Text style={styles.hintText}>上でタップ/フリック・絵文字層を掴んでスクロール</Text>
-        </View>
-
         {/* 感情ピッカー（半透明オーバーレイ。奥を飛ぶ絵文字が透けて見える） */}
         <View style={styles.pickerOverlay} pointerEvents="box-none">
           <EmotionPicker selected={selected} onSelect={setSelected} />
@@ -597,8 +589,6 @@ const styles = StyleSheet.create({
   datePill: { position: 'absolute', right: 8, backgroundColor: 'rgba(40,34,26,0.82)', borderRadius: 11, paddingHorizontal: 9, paddingVertical: 3 },
   datePillText: { fontSize: 11, fontWeight: '700', color: '#FBF7EF' },
   held: { position: 'absolute' },
-  hint: { position: 'absolute', alignSelf: 'center', top: '8%', alignItems: 'center', gap: 4 },
-  hintText: { fontSize: 12, color: text.faint, letterSpacing: 1 },
   build: { position: 'absolute', right: 6, bottom: 3, opacity: 0.6 },
   buildText: { fontSize: 9, color: text.faint },
 });
