@@ -3,7 +3,8 @@ import Matter from 'matter-js';
 
 import { EmotionEntry } from '../storage/entries';
 import { EmotionKey } from '../theme/emotions';
-import { computeDateBandedPile, DateBoundary } from '../layout/dateBands';
+import { DateBoundary } from '../layout/dateBands';
+import { loadOrComputeBandedPile } from '../layout/pileCache';
 
 export interface BoxBall {
   bodyId: number;
@@ -500,15 +501,26 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     (entries: EmotionEntry[]) => {
       if (seededRef.current || !engineRef.current || width <= 0) return;
       seededRef.current = true;
-      // 日付ごとにバンド（層）で積む。境界（点線用）も取得。
-      const { placements, boundaries, topY } = computeDateBandedPile(entries, { width, ballSize, groundY: GROUND_Y });
-      for (const p of placements) {
-        const body = addBody(p.emotion, p.variation, p.x, p.y);
-        if (body) Matter.Sleeping.set(body, true);
-      }
-      restTopRef.current = topY;
-      setBoundaries(boundaries);
-      setMeta({ restTopY: topY, activeCount: 0 });
+      // 【Phase 1】ベイク済みレイアウトを永続キャッシュから読む（無ければ計算して保存）。
+      // 物理 settle を起動毎に回さない。位置・境界・見た目は computeDateBandedPile と同一。
+      loadOrComputeBandedPile(entries, { width, ballSize, groundY: GROUND_Y })
+        .then(({ placements, boundaries, topY }) => {
+          // await 中にアンマウント/再初期化された場合は中断（再シードできるようフラグを戻す）。
+          if (!engineRef.current) {
+            seededRef.current = false;
+            return;
+          }
+          for (const p of placements) {
+            const body = addBody(p.emotion, p.variation, p.x, p.y);
+            if (body) Matter.Sleeping.set(body, true);
+          }
+          restTopRef.current = topY;
+          setBoundaries(boundaries);
+          setMeta({ restTopY: topY, activeCount: 0 });
+        })
+        .catch(() => {
+          seededRef.current = false;
+        });
     },
     [addBody, ballSize, width]
   );

@@ -242,6 +242,25 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
     check('T16 すり抜け: 凸凹な表面でも潜り込まない', slip === 0, `slipped=${slip} ${JSON.stringify(bad)}`);
   }
 
+  // T17 永続キャッシュ(Phase 1): 初回ロードで baked レイアウトを保存(miss)、同コンテキストの
+  // リロードで命中(hit)し、物理 settle を回さず同一レイアウト(placements)を復元する。
+  {
+    const cp = await newPage(browser, false, errors);
+    const readPile = () => cp.evaluate(() => {
+      const raw = localStorage.getItem('emory.pile');
+      const c = raw ? JSON.parse(raw) : null;
+      return { cache: window.__emoryPileCache, sig: c && c.sig, pl: c && c.pile && JSON.stringify(c.pile.placements) };
+    });
+    const first = await readPile();
+    await cp.reload({ waitUntil: 'networkidle0', timeout: 60000 });
+    await sleep(3200);
+    const second = await readPile();
+    await cp.close();
+    const same = !!first.pl && first.pl === second.pl && first.sig === second.sig;
+    check('T17 永続キャッシュ: 再読込で命中し同一レイアウト', first.cache === 'miss' && second.cache === 'hit' && same,
+      `first=${first.cache} second=${second.cache} same=${same}`);
+  }
+
   check('T12 no console/page errors', errors.length === 0, errors.slice(0, 4).join(' | '));
 
   await browser.close();
