@@ -37,7 +37,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b50 hint';
+const BUILD = 'A 層統合';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -121,22 +121,48 @@ const Boundaries = React.memo(function Boundaries({ boundaries, width }: { bound
   );
 });
 
+/**
+ * 【案1】1個のボール（プリミティブ props・memo化）。
+ * 固定層↔動的層を1つのリストに統合した上で、各ボールを「プリミティブ props を取る memo」
+ * として描く。位置(x,y,angle)が変わらない固定ボールは props 不変 → 再レンダリングを免れる
+ * （= 固定層を窓スライスする従来の負荷抑制を、1リストのままでも維持できる）。
+ * style オブジェクトはこの中で生成するので、memo が効く限り EmotionBall も再描画されない。
+ */
+const PileBall = React.memo(function PileBall({
+  emotion,
+  variation,
+  size,
+  x,
+  y,
+  angle,
+}: {
+  emotion: EmotionKey;
+  variation: number;
+  size: number;
+  x: number;
+  y: number;
+  angle: number;
+}) {
+  return (
+    <EmotionBall
+      emotion={emotion}
+      variation={variation}
+      size={size}
+      style={{
+        position: 'absolute',
+        left: x - size / 2,
+        top: y - size / 2,
+        transform: [{ rotate: `${angle}rad` }],
+      }}
+    />
+  );
+});
+
 const BallsLayer = React.memo(function BallsLayer({ balls }: { balls: BoxBall[] }) {
   return (
     <>
       {balls.map((b) => (
-        <EmotionBall
-          key={b.bodyId}
-          emotion={b.emotion}
-          variation={b.variation}
-          size={b.size}
-          style={{
-            position: 'absolute',
-            left: b.x - b.size / 2,
-            top: b.y - b.size / 2,
-            transform: [{ rotate: `${b.angle}rad` }],
-          }}
-        />
+        <PileBall key={b.bodyId} emotion={b.emotion} variation={b.variation} size={b.size} x={b.x} y={b.y} angle={b.angle} />
       ))}
     </>
   );
@@ -474,6 +500,12 @@ function AddScreen({ entries, onAdd }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [frozenVersion, camBucket, area.h]);
 
+  // 【案1】固定層（窓スライス）＋動的層を1つのリストに統合。同一 key のボールが固定で
+  // active→frozen に移っても、同じリスト内の「移動」になるため React は DOM ノードを
+  // 作り直さず付け替えるだけ＝ <img> の再マウント（=点滅）が起きない。
+  // frozenVisible は camBucket/frozenVersion 変化時のみ・balls は毎フレーム変化 → concat は軽量。
+  const pile = useMemo(() => frozenVisible.concat(balls), [frozenVisible, balls]);
+
   return (
     <View style={styles.screen}>
       <Header
@@ -511,10 +543,8 @@ function AddScreen({ entries, onAdd }: Props) {
         {/* カメラはこのコンテナの translateY 一括変換で表現（スクロールは1ノード更新のみ）。
             中のボールはワールド座標固定 → 固定層はカメラ移動で再描画されない。 */}
         <View style={[StyleSheet.absoluteFill, { transform: [{ translateY: -cameraY }] }]} pointerEvents="none">
-          {/* 固定層（位置不変・memo化。固定追加（=可視スライス変化）時だけ再描画） */}
-          <BallsLayer balls={frozenVisible} />
-          {/* 動的層（飛行中＋上層の眠り・毎フレーム） */}
-          <BallsLayer balls={balls} />
+          {/* 【案1】固定層＋動的層を統合した単一リスト（固定で層移動しても <img> を作り直さない） */}
+          <BallsLayer balls={pile} />
           {/* 日付バンドの境界（点線）＋日付ピル */}
           {boundaries.length > 0 && <Boundaries boundaries={boundaries} width={area.w} />}
         </View>
