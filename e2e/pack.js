@@ -261,6 +261,20 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
       `first=${first.cache} second=${second.cache} same=${same}`);
   }
 
+  // T18 履歴保持(Phase 2): 旧上限180を超えて積んでも固定データを破棄しない（=下層/記録が
+  // 消えない, #13/#11）。固定層は窓スライス描画なので fps も落ちない。
+  {
+    const hp = await newPage(browser, false, errors);
+    const cdp = await hp.target().createCDPSession();
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 3 });
+    await hp.evaluate(() => { window.__frames = []; let last = performance.now(); const t = (n) => { window.__frames.push(n - last); last = n; if (window.__sampling) requestAnimationFrame(t); }; window.__sampling = true; requestAnimationFrame(t); });
+    for (let i = 0; i < 220; i++) { await hp.touchscreen.tap(40 + (i % 9) * 38, 185); await sleep(45); }
+    await sleep(3500);
+    const m = await hp.evaluate(() => { window.__sampling = false; const f = window.__frames.filter((d) => d > 0 && d < 1000).sort((a, b) => a - b); return { fps: Math.round(1000 / (f[Math.floor(f.length * 0.5)] || 0)), frozen: window.__emoryFrozenCount || 0 }; });
+    await hp.close();
+    check('T18 履歴保持: 旧上限超でも下層を捨てず軽い', m.frozen > 180 && m.fps >= 40, `frozen=${m.frozen} fps=${m.fps}`);
+  }
+
   check('T12 no console/page errors', errors.length === 0, errors.slice(0, 4).join(' | '));
 
   await browser.close();

@@ -56,7 +56,11 @@ function dayLabel(iso: string): string {
 
 export function computeDateBandedPile(entries: EmotionEntry[], opts: BandOptions): BandedPile {
   const { width, ballSize, groundY } = opts;
-  const max = opts.max ?? 200;
+  // 保存履歴は MAX_STORED_ENTRIES(=600) で上限化されているので、その全件をレイアウトする
+  // （＝直近200件で古い層が切れていた問題を解消し、保存分すべてを遡れる）。さらに大量
+  // 履歴（数千〜）はこの全件 settle が O(N²) で重くなるため、Phase 3 の日毎・増分ベイクで
+  // 「今日の帯だけ計算」に置き換える。それまでの安全上限としてここを置く。
+  const max = opts.max ?? 600;
   const stepsPerDay = opts.stepsPerDay ?? 170;
   const sorted = [...entries]
     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())

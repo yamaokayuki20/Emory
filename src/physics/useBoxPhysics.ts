@@ -64,8 +64,11 @@ const RETAIN_FRAMES = 4;
 const REMOVE_EXTRA_ROWS = 26;
 // 当たり判定＝見た目の径＋1px（重ならないための最小間隔）。
 const GAP_PX = 1;
-// 描画・追跡する固定ボールの上限（画面外に流れた古いものは破棄＝総数非依存に保つ）。
-const MAX_FROZEN = 180;
+// 描画・追跡する固定ボールの安全上限。描画は visibleSlice で画面内スライスだけに窓化され、
+// 物理ボディは removeDepth で表面付近に限定されるため、総数が増えても DOM も物理も増えない
+// （＝重くならない）。よってこの上限は「際限ない肥大の保険」であり、実使用（保存履歴は
+// MAX_STORED_ENTRIES で上限）では決して当たらない高い値にする。下層の記録を捨てない（#13/#11）。
+const MAX_FROZEN = 20000;
 
 /** y昇順を保ったまま挿入（二分探索）。固定ボールは位置不変なので順序も不変。 */
 function insertSortedByY(arr: BoxBall[], b: BoxBall) {
@@ -404,9 +407,10 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
       // 自己テスト用フック（実害なし・O(1)）。
       if (typeof window !== 'undefined') {
-        const w = window as unknown as { __emoryFrameSink?: number; __emoryMaxBallSink?: number; __emoryLastDrop?: unknown };
+        const w = window as unknown as { __emoryFrameSink?: number; __emoryMaxBallSink?: number; __emoryLastDrop?: unknown; __emoryFrozenCount?: number };
         w.__emoryFrameSink = Math.round(maxSink);
         w.__emoryMaxBallSink = Math.round(maxBallSink);
+        w.__emoryFrozenCount = frozenSortedRef.current.length;
         // 直近に落としたボールの沈み込み: その列の他ボール表面(settledTopCol)よりどれだけ深いか。
         // 表面に積まれていれば ~0、層を貫通して下へ落ちると大きい。
         const ld = lastDropRef.current;
