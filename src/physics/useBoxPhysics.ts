@@ -167,10 +167,17 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     // 固定タイムステップ。matter は correction=delta/lastDelta で前回比に速度を伸縮させる
     // ため、可変フレーム間隔だと移動量がスパイクして貫通する。常に一定にして correction≈1。
     const FIXED_DELTA = 16;
+    // 描画フレームレートからシミュレーションを切り離す。実経過時間ぶんだけ固定16msステップを
+    // 進めるので、端末が60fps未満（大量の山など）でも落下/積み上げの速度が壁時計で一定に保たれる
+    // （＝以前の落下速度を維持）。重い時はステップ数を上限で打ち切りスローモーションに留め、
+    // スパイラル（追いつけず更に重くなる）を防ぐ。1ステップ移動量は VMAX で制限済み＝多段でも貫通しない。
+    const MAX_SUBSTEPS = 5;
+    let simLast = performance.now();
+    let simAcc = 0;
 
-    const loop = () => {
-      if (!mounted) return;
-
+    const minSep = ballSize * 0.84 + GAP_PX;
+    const stepSim = () => {
+      // 速度キャップ（1ステップ移動量をボール径の〜1/5に制限＝貫通防止）。
       for (const b of Matter.Composite.allBodies(engine.world)) {
         if (b.isStatic || !metaRef.current.has(b.id)) continue;
         const v = b.velocity;
@@ -184,7 +191,6 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
 
       // デペネトレーション: 接触ペアが「見た目の径+1px」より近ければ直接押し離す。
       // matter の接触情報(engine.pairs)だけを使うので軽量。動的ボールの重なりを能動解消。
-      const minSep = ballSize * 0.84 + GAP_PX;
       const pairs = engine.pairs.list;
       for (let pi = 0; pi < pairs.length; pi++) {
         const pair = pairs[pi];
@@ -209,6 +215,24 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
           Matter.Body.translate(b, { x: nx * push, y: ny * push });
         }
       }
+    };
+
+    const loop = () => {
+      if (!mounted) return;
+
+      // 実経過時間ぶんだけ固定ステップを進める（フレームレート非依存）。
+      const nowT = performance.now();
+      let frameDt = nowT - simLast;
+      simLast = nowT;
+      if (frameDt > 100) frameDt = 100; // タブ復帰等の巨大ギャップを抑制
+      simAcc += frameDt;
+      let substeps = 0;
+      while (simAcc >= FIXED_DELTA && substeps < MAX_SUBSTEPS) {
+        stepSim();
+        simAcc -= FIXED_DELTA;
+        substeps++;
+      }
+      if (substeps >= MAX_SUBSTEPS) simAcc = 0; // 重すぎ：余剰を捨てる（スローモーション許容）
 
       // バスケのリング＝物理障害物。縁に当たればバウンド・中央を上から抜けた時だけスコア。
       // 左リム=小さな円。右リム=「斜めの板」にする(#5)。ゴールが画面右端ぴったりのため
@@ -411,6 +435,18 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         w.__emoryFrameSink = Math.round(maxSink);
         w.__emoryMaxBallSink = Math.round(maxBallSink);
         w.__emoryFrozenCount = frozenSortedRef.current.length;
+        // 自己テスト用: 固定(描画専用含む)ボール全部のワールド座標ダンプ。重なり計測に使う。
+        const ww = window as unknown as { __emoryFrozenDump?: () => number[][]; __emoryAllDump?: () => number[][] };
+        if (!ww.__emoryFrozenDump) ww.__emoryFrozenDump = () => frozenSortedRef.current.map((b) => [Math.round(b.x), Math.round(b.y)]);
+        // 全ボール（物理に残る active/sleeping/static ＋ 描画専用の固定）のワールド座標。
+        if (!ww.__emoryAllDump)
+          ww.__emoryAllDump = () => {
+            const out: number[][] = [];
+            const eng = engineRef.current;
+            if (eng) for (const b of Matter.Composite.allBodies(eng.world)) if (metaRef.current.has(b.id)) out.push([Math.round(b.position.x), Math.round(b.position.y)]);
+            frozenMapRef.current.forEach((fb) => { if (!metaRef.current.has(fb.bodyId)) out.push([Math.round(fb.x), Math.round(fb.y)]); });
+            return out;
+          };
         // 直近に落としたボールの沈み込み: その列の他ボール表面(settledTopCol)よりどれだけ深いか。
         // 表面に積まれていれば ~0、層を貫通して下へ落ちると大きい。
         const ld = lastDropRef.current;

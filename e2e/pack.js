@@ -220,7 +220,9 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
     await sleep(2500);
     const stuck = await bp.evaluate((ry, ccx) => { let n = 0; for (const i of document.querySelectorAll('img')) { const r = i.getBoundingClientRect(); const y = r.top + r.height / 2, x = r.left + r.width / 2; if (r.width >= 20 && r.width <= 70 && Math.abs(y - ry) < 38 && x > ccx) n++; } return n; }, ringY, cx);
     const surfAfter = await bp.evaluate(() => { const s = window.__emorySurf; return s ? Math.round(s(180)) : 0; });
-    check('T11 basket 右リム端で固着しない', stuck === 0 && surfBefore - surfAfter < 80, `stuck=${stuck} rose=${surfBefore - surfAfter}`);
+    // 固着の主判定は stuck===0（リム高さに居座る球が無い）。rose は念のための補助で、
+    // 8個分の正当な積み上がり(~2-3段)を許容しつつ、リム固着でカメラが暴れる(数百px)のは捉える。
+    check('T11 basket 右リム端で固着しない', stuck === 0 && surfBefore - surfAfter < 160, `stuck=${stuck} rose=${surfBefore - surfAfter}`);
   }
   await bp.close();
 
@@ -273,6 +275,35 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
     const m = await hp.evaluate(() => { window.__sampling = false; const f = window.__frames.filter((d) => d > 0 && d < 1000).sort((a, b) => a - b); return { fps: Math.round(1000 / (f[Math.floor(f.length * 0.5)] || 0)), frozen: window.__emoryFrozenCount || 0 }; });
     await hp.close();
     check('T18 履歴保持: 旧上限超でも下層を捨てず軽い', m.frozen > 180 && m.fps >= 40, `frozen=${m.frozen} fps=${m.fps}`);
+  }
+
+  // T19 大量履歴のシード: 多数の保存履歴があっても読み込みが固まらず(時間内にシード完了)、
+  // シード(初期パイル)が重ならない。T15(デモ約40個)では捉えられない「大規模シードの
+  // レイアウト破綻/読み込みハング」を防ぐ（dateBans の配置上限を上げ過ぎると失敗する）。
+  {
+    const sp = await browser.newPage();
+    sp.on('pageerror', (e) => errors.push('PAGEERROR ' + e.message));
+    await sp.setViewport({ width: 390, height: 844, deviceScaleFactor: 2 });
+    await sp.evaluateOnNewDocument(() => {
+      try {
+        localStorage.setItem('emory.debugUnlimited', '1');
+        const emo = ['happy', 'excited', 'calm', 'relaxed', 'tired', 'sad', 'anxious', 'irritated'];
+        const out = []; const now = Date.now();
+        for (let i = 0; i < 600; i++) { const day = Math.floor(i / 12); const e = emo[(i * 7) % emo.length]; const d = new Date(now - day * 86400000); d.setHours(9 + (i % 12), (i * 5) % 60, 0, 0); out.push({ id: 's' + i, emotion: e, variation: i % 4, color: '#888', createdAt: d.toISOString() }); }
+        out.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+        localStorage.setItem('emory.entries', JSON.stringify(out));
+      } catch (e) {}
+    });
+    const t0 = Date.now();
+    let loadOk = true;
+    try { await sp.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30000 }); } catch (e) { loadOk = false; }
+    let seeded = 0;
+    for (let k = 0; k < 250 && loadOk; k++) { seeded = await sp.evaluate(() => window.__emoryFrozenCount || 0).catch(() => 0); if (seeded > 0) break; await sleep(100); }
+    const loadMs = Date.now() - t0;
+    await sleep(3000);
+    const ov = await sp.evaluate(() => { const f = window.__emoryAllDump ? window.__emoryAllDump() : []; const D = 46; let severe = 0, minD = 1e9; for (let a = 0; a < f.length; a++) { let nd = 1e9; for (let b = 0; b < f.length; b++) { if (a === b) continue; const dx = f[a][0] - f[b][0], dy = f[a][1] - f[b][1]; const d = Math.sqrt(dx * dx + dy * dy); if (d < nd) nd = d; } if (nd < minD) minD = nd; if (nd < D * 0.55) severe++; } return { n: f.length, severe, minDist: Math.round(minD) }; }).catch(() => ({ n: 0, severe: -1, minDist: 0 }));
+    await sp.close();
+    check('T19 大量シード: 固まらず重ならない', loadOk && loadMs < 25000 && ov.severe === 0 && ov.n > 0, `loadMs=${loadMs} n=${ov.n} severe=${ov.severe} minDist=${ov.minDist}`);
   }
 
   check('T12 no console/page errors', errors.length === 0, errors.slice(0, 4).join(' | '));

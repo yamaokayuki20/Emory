@@ -12,8 +12,9 @@ import { BandedPile, BandOptions, computeDateBandedPile } from './dateBands';
  */
 
 const PILE_KEY = 'emory.pile';
-// レイアウト計算の世代。dateBands のアルゴリズムを変えたら上げて、古いキャッシュを無効化する。
-const LAYOUT_VERSION = 1;
+// レイアウト計算の世代。dateBands のアルゴリズム/上限を変えたら上げて、古いキャッシュを無効化する。
+// v2: 配置上限を 600→200 に戻した（600 は読み込みが固まり、settle 破綻で下層が重なるため）。
+const LAYOUT_VERSION = 2;
 
 interface CachedPile {
   sig: string;
