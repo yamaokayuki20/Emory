@@ -1,0 +1,149 @@
+name: Deploy blink previews (A/B/C)
+
+# 点滅対策の3案（A=層統合 / B=クロス保持 / C=画像プリロード）を
+# 1つの Pages サイトの 3 サブパスに同時公開して、手触りを比較評価するための
+# 一時ワークフロー。手動実行（workflow_dispatch）のみ。
+#   ルート /Emory/      → 3案を選ぶランディング
+#   /Emory/a/           → 案1（claude/blink-a）
+#   /Emory/b/           → 案2（claude/blink-b）
+#   /Emory/c/           → 案3（claude/blink-c）
+# ※ Pages はリポジトリにつき1サイトのため、main への通常デプロイが走ると
+#   このプレビューは上書きされる（＝評価が終わって勝者を main にマージした時点で
+#   通常サイトへ戻る、という運用）。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { variant: a, branch: claude/blink-a }
+          - { variant: b, branch: claude/blink-b }
+          - { variant: c, branch: claude/blink-c }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type & spec checks
+        run: npm run check
+
+      - name: Set baseUrl to /Emory/${{ matrix.variant }}
+        run: |
+          node -e "const fs=require('fs');const p='app.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.expo.experiments=j.expo.experiments||{};j.expo.experiments.baseUrl='/Emory/${{ matrix.variant }}';fs.writeFileSync(p,JSON.stringify(j,null,2));console.log('baseUrl=',j.expo.experiments.baseUrl);"
+
+      - name: Export web build
+        run: npx expo export --platform web
+
+      - name: Upload variant artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.variant }}
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download all variant builds
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble site (a/b/c + chooser)
+        run: |
+          set -e
+          mkdir -p site/a site/b site/c
+          cp -r artifacts/build-a/. site/a/
+          cp -r artifacts/build-b/. site/b/
+          cp -r artifacts/build-c/. site/c/
+          touch site/.nojekyll
+          cat > site/index.html <<'HTML'
+          <!doctype html>
+          <html lang="ja">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+            <title>エモリー 点滅対策 3案 比較</title>
+            <style>
+              :root { color-scheme: light; }
+              * { box-sizing: border-box; }
+              body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; background: #F3ECE0; color: #463A2C; }
+              .wrap { max-width: 640px; margin: 0 auto; padding: 28px 20px 56px; }
+              h1 { font-size: 20px; margin: 8px 0 4px; }
+              p.lead { font-size: 13px; line-height: 1.7; color: #6b5d49; margin: 0 0 20px; }
+              a.card { display: block; text-decoration: none; color: inherit; background: #fff; border: 1px solid #e3d8c6; border-radius: 16px; padding: 18px 18px; margin: 12px 0; box-shadow: 0 2px 8px rgba(70,58,44,0.06); transition: transform .08s ease; }
+              a.card:active { transform: scale(0.99); }
+              .tag { display: inline-block; font-weight: 700; font-size: 12px; padding: 3px 10px; border-radius: 999px; background: #463A2C; color: #fff; margin-bottom: 8px; }
+              .title { font-size: 16px; font-weight: 700; margin: 2px 0 6px; }
+              .desc { font-size: 12.5px; line-height: 1.65; color: #6b5d49; margin: 0; }
+              .go { margin-top: 10px; font-size: 13px; font-weight: 700; color: #C86939; }
+              .note { font-size: 11.5px; color: #9a8c77; line-height: 1.6; margin-top: 22px; }
+            </style>
+          </head>
+          <body>
+            <div class="wrap">
+              <h1>エモリー｜生成時の点滅 対策 3案</h1>
+              <p class="lead">3つの対策を別々に試せます。1つずつ遊んで、生成（絵文字を落とす）瞬間の点滅と全体の手触りを比べてください。重なり・貫通の挙動はどの案も自動テスト16項目で不変を確認済みです。</p>
+
+              <a class="card" href="./a/">
+                <span class="tag">案1</span>
+                <div class="title">層統合</div>
+                <p class="desc">固定層と動的層を1つのリストに統合。固定で層を移っても要素を作り直さない＝点滅の根を断つ方式。再マウント検出は 0。</p>
+                <div class="go">この案を試す →</div>
+              </a>
+
+              <a class="card" href="./b/">
+                <span class="tag">案2</span>
+                <div class="title">クロス保持</div>
+                <p class="desc">固定した瞬間、新しい画像がロードし終わるまで古いコピーを数フレーム重ねて表示。2層構造は維持したまま空白フレームを隠す方式。</p>
+                <div class="go">この案を試す →</div>
+              </a>
+
+              <a class="card" href="./c/">
+                <span class="tag">案3</span>
+                <div class="title">画像プリロード</div>
+                <p class="desc">全ボール画像を起動時にデコード＆キャッシュ。新しい画像も即描画され空白が出にくい。構造は一切変えない最小変更の方式。</p>
+                <div class="go">この案を試す →</div>
+              </a>
+
+              <p class="note">※ 右下のビルドタグ（A 層統合 / B クロス保持 / C 画像プリロード）で、今どの案を見ているか確認できます。<br/>※ 強制リロード（キャッシュ破棄）で最新版になります。</p>
+            </div>
+          </body>
+          </html>
+          HTML
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
