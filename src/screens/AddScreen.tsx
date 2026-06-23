@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Animated,
   Easing,
+  Image,
   LayoutChangeEvent,
   StyleSheet,
   Text,
@@ -28,7 +29,7 @@ import type { DateBoundary } from '../layout/dateBands';
 import { EmotionEntry } from '../storage/entries';
 import { consumeThrow, getThrowState, isDebugUnlimited, setDebugUnlimited } from '../storage/rateLimit';
 import { bg, text } from '../theme/colors';
-import { EmotionKey, getEmotion } from '../theme/emotions';
+import { EMOTION_ORDER, EmotionKey, ballSource, getEmotion } from '../theme/emotions';
 
 interface Props {
   entries: EmotionEntry[];
@@ -37,7 +38,25 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b50 hint';
+const BUILD = 'C 画像プリロード';
+
+/**
+ * 【案3】全ボール画像（8感情×4バリエーション=32枚）を画面外に常時マウントしておく。
+ * ブラウザがそれぞれを読み込み＆デコードしてキャッシュに保持するので、固定層↔動的層の
+ * 移動で新しい <img> がマウントされても、キャッシュ済み＝同フレームで描画される
+ * （空白フレーム＝点滅が出にくい）。物理・描画構造・固定/除去のタイミングには一切触れない。
+ */
+const BallImagePreloader = React.memo(function BallImagePreloader() {
+  return (
+    <View style={styles.preloader} pointerEvents="none" aria-hidden>
+      {EMOTION_ORDER.map((key) =>
+        [0, 1, 2, 3].map((v) => (
+          <Image key={`${key}_${v}`} source={ballSource(key, v)} style={styles.preloadImg} resizeMode="contain" />
+        ))
+      )}
+    </View>
+  );
+});
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -561,6 +580,9 @@ function AddScreen({ entries, onAdd }: Props) {
           <EmotionPicker selected={selected} onSelect={setSelected} />
         </View>
 
+        {/* 【案3】画像プリロード（画面外・常時マウント） */}
+        <BallImagePreloader />
+
         {/* ビルド表示（キャッシュ判別用） */}
         <View style={styles.build} pointerEvents="none">
           <Text style={styles.buildText}>{BUILD}</Text>
@@ -591,6 +613,9 @@ const styles = StyleSheet.create({
   held: { position: 'absolute' },
   build: { position: 'absolute', right: 6, bottom: 3, opacity: 0.6 },
   buildText: { fontSize: 9, color: text.faint },
+  // 【案3】画面外プリローダ（画面のはるか上に配置＝下端すり抜け検出に出ない。16px=ボール検出20-70px外）
+  preloader: { position: 'absolute', left: 0, top: -10000, width: 1, height: 1, opacity: 0, overflow: 'hidden' },
+  preloadImg: { width: 16, height: 16 },
 });
 
 export default AddScreen;
