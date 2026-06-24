@@ -37,7 +37,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b54 seedcap';
+const BUILD = 'b55 pileball';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -121,22 +121,55 @@ const Boundaries = React.memo(function Boundaries({ boundaries, width }: { bound
   );
 });
 
+/**
+ * 1個のボール（プリミティブ props・memo化）。
+ * 固定層は「ボールが固定されるたび(=生成/着地時)」に frozenVersion が進んで再描画されるが、
+ * 各ボールをプリミティブ props を取る memo にすることで、位置(x,y,angle)が変わらない既存の
+ * 固定ボールは再レンダリングを免れる（新規に固定された1個だけ描画）。これで生成のたびに
+ * 可視中の全ボール(~150個)を作り直していたフレーム落ちを解消する。
+ * style をこの中で生成するので、memo が効く限り EmotionBall も再描画されない。
+ */
+const PileBall = React.memo(function PileBall({
+  emotion,
+  variation,
+  size,
+  x,
+  y,
+  angle,
+}: {
+  emotion: EmotionKey;
+  variation: number;
+  size: number;
+  x: number;
+  y: number;
+  angle: number;
+}) {
+  // 自己テスト用(実害なし): このコンポーネントが実際に再レンダリングされた回数。
+  // memo が効いていれば、固定のたびに全ボールが作り直される回帰を決定的に検知できる。
+  if (typeof window !== 'undefined') {
+    const w = window as unknown as { __emoryPileRenders?: number };
+    w.__emoryPileRenders = (w.__emoryPileRenders || 0) + 1;
+  }
+  return (
+    <EmotionBall
+      emotion={emotion}
+      variation={variation}
+      size={size}
+      style={{
+        position: 'absolute',
+        left: x - size / 2,
+        top: y - size / 2,
+        transform: [{ rotate: `${angle}rad` }],
+      }}
+    />
+  );
+});
+
 const BallsLayer = React.memo(function BallsLayer({ balls }: { balls: BoxBall[] }) {
   return (
     <>
       {balls.map((b) => (
-        <EmotionBall
-          key={b.bodyId}
-          emotion={b.emotion}
-          variation={b.variation}
-          size={b.size}
-          style={{
-            position: 'absolute',
-            left: b.x - b.size / 2,
-            top: b.y - b.size / 2,
-            transform: [{ rotate: `${b.angle}rad` }],
-          }}
-        />
+        <PileBall key={b.bodyId} emotion={b.emotion} variation={b.variation} size={b.size} x={b.x} y={b.y} angle={b.angle} />
       ))}
     </>
   );

@@ -306,6 +306,26 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
     check('T19 大量シード: 固まらず重ならない', loadOk && loadMs < 25000 && ov.severe === 0 && ov.n > 0, `loadMs=${loadMs} n=${ov.n} severe=${ov.severe} minDist=${ov.minDist}`);
   }
 
+  // T20 固定層の再描画コスト(生成時カクつき防止): 山を静止させ(=飛行中の球ゼロ→ノイズ排除)、
+  // 絵文字層を少しスクロールして可視窓を動かす。memo が効いていれば既に見えている固定ボールは
+  // 作り直されず、再描画は「窓に新しく入った数個」だけ。固定のたびに可視全部(~70個)を作り直す
+  // 回帰だと再描画が可視数を大きく超える。決定的(端末速度に依存しない)に検知できる。
+  {
+    const rp = await newPage(browser, false, errors);
+    for (let i = 0; i < 120; i++) { await rp.touchscreen.tap(40 + (i % 9) * 38, 185); await sleep(45); }
+    await sleep(4500); // 完全静止（active=0）まで待つ
+    const vis = await rp.evaluate(() => [...document.querySelectorAll('img')].filter((i) => { const r = i.getBoundingClientRect(); return r.width >= 20 && r.width <= 70; }).length);
+    const before = await rp.evaluate(() => window.__emoryPileRenders || 0);
+    await rp.mouse.move(195, 650); await rp.mouse.down();
+    for (let k = 1; k <= 6; k++) { await rp.mouse.move(195, 650 - k * 10); await sleep(16); }
+    await rp.mouse.up();
+    await sleep(500);
+    const delta = (await rp.evaluate(() => window.__emoryPileRenders || 0)) - before;
+    await rp.close();
+    // memo 有効: 窓に入った数個のみ。回帰(全再描画): 可視数×スクロール段数。可視数未満を合格とする。
+    check('T20 固定層スクロール再描画が最小', vis > 30 && delta < vis, `vis=${vis} delta=${delta}`);
+  }
+
   check('T12 no console/page errors', errors.length === 0, errors.slice(0, 4).join(' | '));
 
   await browser.close();
