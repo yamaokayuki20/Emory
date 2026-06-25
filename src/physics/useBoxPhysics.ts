@@ -5,6 +5,7 @@ import { EmotionEntry } from '../storage/entries';
 import { EmotionKey } from '../theme/emotions';
 import { DateBoundary } from '../layout/dateBands';
 import { loadOrComputeBandedPile } from '../layout/pileCache';
+import { todayKey } from '../state/clock';
 
 export interface BoxBall {
   bodyId: number;
@@ -436,17 +437,17 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         w.__emoryMaxBallSink = Math.round(maxBallSink);
         w.__emoryFrozenCount = frozenSortedRef.current.length;
         // 自己テスト用: 固定(描画専用含む)ボール全部のワールド座標ダンプ。重なり計測に使う。
+        // 再マウント(日付送り)後も“現在のインスタンス”を指すよう毎フレーム貼り直す（ガードしない）。
         const ww = window as unknown as { __emoryFrozenDump?: () => number[][]; __emoryAllDump?: () => number[][] };
-        if (!ww.__emoryFrozenDump) ww.__emoryFrozenDump = () => frozenSortedRef.current.map((b) => [Math.round(b.x), Math.round(b.y)]);
+        ww.__emoryFrozenDump = () => frozenSortedRef.current.map((b) => [Math.round(b.x), Math.round(b.y)]);
         // 全ボール（物理に残る active/sleeping/static ＋ 描画専用の固定）のワールド座標。
-        if (!ww.__emoryAllDump)
-          ww.__emoryAllDump = () => {
-            const out: number[][] = [];
-            const eng = engineRef.current;
-            if (eng) for (const b of Matter.Composite.allBodies(eng.world)) if (metaRef.current.has(b.id)) out.push([Math.round(b.position.x), Math.round(b.position.y)]);
-            frozenMapRef.current.forEach((fb) => { if (!metaRef.current.has(fb.bodyId)) out.push([Math.round(fb.x), Math.round(fb.y)]); });
-            return out;
-          };
+        ww.__emoryAllDump = () => {
+          const out: number[][] = [];
+          const eng = engineRef.current;
+          if (eng) for (const b of Matter.Composite.allBodies(eng.world)) if (metaRef.current.has(b.id)) out.push([Math.round(b.position.x), Math.round(b.position.y)]);
+          frozenMapRef.current.forEach((fb) => { if (!metaRef.current.has(fb.bodyId)) out.push([Math.round(fb.x), Math.round(fb.y)]); });
+          return out;
+        };
         // 直近に落としたボールの沈み込み: その列の他ボール表面(settledTopCol)よりどれだけ深いか。
         // 表面に積まれていれば ~0、層を貫通して下へ落ちると大きい。
         const ld = lastDropRef.current;
@@ -543,7 +544,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
       seededRef.current = true;
       // 【Phase 1】ベイク済みレイアウトを永続キャッシュから読む（無ければ計算して保存）。
       // 物理 settle を起動毎に回さない。位置・境界・見た目は computeDateBandedPile と同一。
-      loadOrComputeBandedPile(entries, { width, ballSize, groundY: GROUND_Y })
+      loadOrComputeBandedPile(entries, { width, ballSize, groundY: GROUND_Y, todayKey: todayKey() })
         .then(({ placements, boundaries, topY }) => {
           // await 中にアンマウント/再初期化された場合は中断（再シードできるようフラグを戻す）。
           if (!engineRef.current) {

@@ -33,11 +33,17 @@ import { EmotionKey, getEmotion } from '../theme/emotions';
 interface Props {
   entries: EmotionEntry[];
   onAdd: (emotion: EmotionKey, memo?: string) => Promise<EmotionEntry>;
+  /** デバッグ: 現在の日付ラベル（例 6/25） */
+  dateLabel?: string;
+  /** デバッグ: 1日進める（日跨ぎの引き継ぎ確認用） */
+  onAdvanceDay?: () => void;
+  /** デバッグ: 全消去（初回インストール状態へ） */
+  onClearData?: () => void;
 }
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b56 inertia';
+const BUILD = 'b57 daybtn';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -175,7 +181,7 @@ const BallsLayer = React.memo(function BallsLayer({ balls }: { balls: BoxBall[] 
   );
 });
 
-function AddScreen({ entries, onAdd }: Props) {
+function AddScreen({ entries, onAdd, dateLabel, onAdvanceDay, onClearData }: Props) {
   const [area, setArea] = useState({ w: 0, h: 0 });
   const [selected, setSelected] = useState<EmotionKey>('happy');
   const [remaining, setRemaining] = useState(10);
@@ -276,27 +282,36 @@ function AddScreen({ entries, onAdd }: Props) {
     if (typeof window !== 'undefined') (window as unknown as { __emoryCameraY?: number }).__emoryCameraY = cameraY;
   }, [cameraY]);
 
+  // 自己テスト用(実害なし): 日付境界線の数。日跨ぎ(過去日が閉じる)の検証に使う。
+  useEffect(() => {
+    if (typeof window !== 'undefined') (window as unknown as { __emoryBoundaryCount?: number }).__emoryBoundaryCount = boundaries.length;
+  }, [boundaries]);
+
   // 残数・デバッグ
   useEffect(() => {
     getThrowState().then((s) => setRemaining(s.remaining));
     isDebugUnlimited().then(setUnlimited);
   }, []);
 
-  // 初期シード＋カメラ初期位置
+  // 初期シード＋カメラ初期位置。マウント時に一度だけ「現在の履歴」を積む（空なら絵文字層なし）。
+  // 以降の投擲は物理ボールとして追加され、ここでは再シードしない（二重生成を防ぐ）。
+  // 日付送り/全消去の際は App が key を変えて本コンポーネントを作り直し、再シードする。
   const seededRef = useRef(false);
   useEffect(() => {
-    if (!seededRef.current && area.w > 0 && area.h > 0 && entries.length > 0) {
+    if (!seededRef.current && area.w > 0 && area.h > 0) {
       seededRef.current = true;
       seed(entries);
     }
   }, [area.w, area.h, entries, seed]);
 
-  // 山が分かったら初回だけカメラを合わせる（上端を TARGET_FRAC に＝即フレーミング）
+  // 初回だけカメラを合わせる。山があればその上端を、無ければ箱の床を TARGET_FRAC に置く
+  // （＝空っぽ(初回インストール)でも床が見えて、そこへ積み始められる）。
   const camInitRef = useRef(false);
   useEffect(() => {
-    if (!camInitRef.current && area.h > 0 && restTopY < groundY) {
+    if (!camInitRef.current && area.h > 0) {
       camInitRef.current = true;
-      const c = restTopY - area.h * TARGET_FRAC;
+      const base = restTopY < groundY ? restTopY : groundY; // 山頂 or 床
+      const c = base - area.h * TARGET_FRAC;
       cameraYRef.current = c;
       setCameraY(c);
     }
@@ -572,6 +587,9 @@ function AddScreen({ entries, onAdd }: Props) {
         onToggleDebug={toggleDebug}
         microLabel={micro === 'ufo' ? 'UFO' : 'バスケ'}
         onCycleMicro={cycleMicro}
+        dateLabel={dateLabel}
+        onAdvanceDay={onAdvanceDay}
+        onClearData={onClearData}
       />
 
       {/* 箱（ヘッダー直下のフル高さ。上に半透明ピッカーを重ねる） */}

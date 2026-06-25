@@ -20,15 +20,42 @@ function check(name, cond, detail) {
   if (!cond) failed++;
 }
 
-async function newPage(browser, forceBasket, errors) {
-  const page = await browser.newPage();
+// 各ページを隔離ストレージ(incognito)で開く。テスト間で entries/pile/clock が混ざらない。
+async function freshContext(browser) {
+  if (typeof browser.createBrowserContext === 'function') return browser.createBrowserContext();
+  if (typeof browser.createIncognitoBrowserContext === 'function') return browser.createIncognitoBrowserContext();
+  return browser.defaultBrowserContext();
+}
+
+// アプリは初回インストール時は空（自動デモシードなし）。多くのテストは「履歴のある
+// 復帰ユーザー」を前提にするため、約48個(直近6日)のデモ履歴を注入してから開く。
+// opts.empty で空(初回)、opts.entries で任意の履歴を注入できる。
+async function newPage(browser, forceBasket, errors, opts) {
+  opts = opts || {};
+  const ctx = await freshContext(browser);
+  const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push('PAGEERROR ' + e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push('CONSOLE ' + m.text()); });
   await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2 });
-  await page.evaluateOnNewDocument((fb) => {
-    try { localStorage.setItem('emory.debugUnlimited', '1'); } catch (e) {}
+  const mode = opts.empty ? 'empty' : 'demo';
+  await page.evaluateOnNewDocument((fb, m, custom) => {
+    try {
+      localStorage.setItem('emory.debugUnlimited', '1');
+      localStorage.removeItem('emory.clockOffsetMs'); // 時計は実時刻から
+      if (m === 'empty') {
+        localStorage.removeItem('emory.entries');
+        localStorage.removeItem('emory.pile');
+      } else if (custom) {
+        localStorage.setItem('emory.entries', JSON.stringify(custom));
+      } else {
+        const emo = ['happy', 'excited', 'calm', 'relaxed', 'tired', 'sad', 'anxious', 'irritated'];
+        const out = []; const now = Date.now();
+        for (let d = 5; d >= 0; d--) { for (let i = 0; i < 8; i++) { const dt = new Date(now - d * 86400000); dt.setHours(9 + i, (i * 13) % 60, 0, 0); out.push({ id: `seed${d}_${i}`, emotion: emo[(d + i) % 8], variation: i % 4, color: '#888', createdAt: dt.toISOString() }); } }
+        localStorage.setItem('emory.entries', JSON.stringify(out));
+      }
+    } catch (e) {}
     Math.random = () => (fb ? 0.99 : 0.01);
-  }, forceBasket);
+  }, forceBasket, mode, opts.entries || null);
   await page.goto(URL, { waitUntil: 'networkidle0', timeout: 60000 });
   await sleep(3200);
   return page;
@@ -281,12 +308,14 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
   // シード(初期パイル)が重ならない。T15(デモ約40個)では捉えられない「大規模シードの
   // レイアウト破綻/読み込みハング」を防ぐ（dateBans の配置上限を上げ過ぎると失敗する）。
   {
-    const sp = await browser.newPage();
+    const sctx = await freshContext(browser);
+    const sp = await sctx.newPage();
     sp.on('pageerror', (e) => errors.push('PAGEERROR ' + e.message));
     await sp.setViewport({ width: 390, height: 844, deviceScaleFactor: 2 });
     await sp.evaluateOnNewDocument(() => {
       try {
         localStorage.setItem('emory.debugUnlimited', '1');
+        localStorage.removeItem('emory.clockOffsetMs');
         const emo = ['happy', 'excited', 'calm', 'relaxed', 'tired', 'sad', 'anxious', 'irritated'];
         const out = []; const now = Date.now();
         for (let i = 0; i < 600; i++) { const day = Math.floor(i / 12); const e = emo[(i * 7) % emo.length]; const d = new Date(now - day * 86400000); d.setHours(9 + (i % 12), (i * 5) % 60, 0, 0); out.push({ id: 's' + i, emotion: e, variation: i % 4, color: '#888', createdAt: d.toISOString() }); }
@@ -348,6 +377,46 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
     const glided = Math.abs(camSettled - camAfter);
     const decel = Math.abs(camSettled - camMid) < glided + 1;
     check('T21 慣性スクロールが効く(#10)', glided > 25 && decel, `after=${Math.round(camAfter)} mid=${Math.round(camMid)} settled=${Math.round(camSettled)} glided=${Math.round(glided)}`);
+  }
+
+  // T22 初回インストールは空（絵文字層なし）: 履歴が無ければ箱は空でボールが描画されない。
+  // バスケモードで開いて UFO スプライト(58px)をボールと誤判定しないようにする。
+  {
+    const ep = await newPage(browser, true, errors, { empty: true });
+    await sleep(1500);
+    // 箱の中のボール総数(物理+固定)で判定。ピッカーの絵文字(画面上部)は __emoryAllDump に含まれない。
+    const r = await ep.evaluate(() => ({ total: (window.__emoryAllDump ? window.__emoryAllDump() : []).length, frozen: window.__emoryFrozenCount || 0 }));
+    await ep.close();
+    check('T22 初回は空(絵文字層なし)', r.total === 0 && r.frozen === 0, `total=${r.total} frozen=${r.frozen}`);
+  }
+
+  // T23 日跨ぎの引き継ぎ: 空から今日ぶんを積み、「+1日」で日付を送ると、積んだ分は
+  // そのまま残り(引き継ぎ)、過去日として境界線で閉じる。さらに翌日ぶんを上に積める。
+  {
+    const dp = await newPage(browser, false, errors, { empty: true });
+    for (let i = 0; i < 12; i++) { await dp.touchscreen.tap(70 + (i % 6) * 42, 175); await sleep(120); }
+    await dp.evaluate(() => new Promise((r) => setTimeout(r, 3500)));
+    // 箱の中のボール総数(物理+固定)＝積んだ記録の数。境界線の数も見る。
+    const snap = () => dp.evaluate(() => ({ n: (window.__emoryAllDump ? window.__emoryAllDump() : []).length, bnd: window.__emoryBoundaryCount || 0 }));
+    const before = await snap();
+    // ヘッダーの「+1日」ボタンを押す（制限解除中に表示）。
+    const btn = await dp.evaluate(() => { const el = [...document.querySelectorAll('*')].find((e) => /\+1日/.test(e.textContent || '') && e.children.length === 0); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; });
+    let after = { n: 0, bnd: 0 };
+    if (btn) {
+      await dp.touchscreen.tap(btn.x, btn.y);
+      await dp.evaluate(() => new Promise((r) => setTimeout(r, 5000))); // 再マウント＋再シード＋settle
+      after = await snap();
+      // 翌日ぶんを少し積む（上に乗る）
+      for (let i = 0; i < 5; i++) { await dp.touchscreen.tap(90 + (i % 4) * 42, 175); await sleep(150); }
+      await dp.evaluate(() => new Promise((r) => setTimeout(r, 2500)));
+    }
+    const afterThrow = (await snap()).n;
+    await dp.close();
+    // 引き継ぎ: 送った後も積んだ分(~12)が残る。過去日として境界が1本以上引かれる。翌日ぶんで増える。
+    const carried = !!btn && after.n >= before.n - 1 && after.n >= 8;
+    const closed = !!btn && after.bnd >= 1 && before.bnd === 0;
+    check('T23 日跨ぎでデータ引き継ぎ＋境界化', carried && closed && afterThrow > after.n,
+      `before=${before.n}/${before.bnd} after=${after.n}/${after.bnd} afterThrow=${afterThrow}`);
   }
 
   check('T12 no console/page errors', errors.length === 0, errors.slice(0, 4).join(' | '));

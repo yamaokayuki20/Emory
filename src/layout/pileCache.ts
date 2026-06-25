@@ -24,10 +24,20 @@ interface CachedPile {
 /** レイアウトに影響する入力だけから安定した署名を作る（並び順に依存しないよう整列）。 */
 function signature(entries: EmotionEntry[], opts: BandOptions): string {
   const rows = entries.map((e) => `${e.id}:${e.emotion}:${e.variation}:${e.createdAt}`).sort();
-  const s = `${opts.width}x${opts.ballSize}x${opts.groundY}|${rows.join(',')}`;
+  // 境界線は「今日」がどの日かで変わる（過去日は上境界を引く）ので todayKey も署名に含める。
+  const s = `${opts.width}x${opts.ballSize}x${opts.groundY}x${opts.todayKey || ''}|${rows.join(',')}`;
   let h = LAYOUT_VERSION >>> 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return `v${LAYOUT_VERSION}-${entries.length}-${h.toString(36)}`;
+}
+
+/** デバッグ: ベイク済みパイルのキャッシュを消す（全消去時に使う）。 */
+export async function clearPileCache(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(PILE_KEY);
+  } catch {
+    // noop
+  }
 }
 
 /**

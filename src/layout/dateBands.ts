@@ -37,6 +37,8 @@ export interface BandOptions {
   groundY: number;
   max?: number;
   stepsPerDay?: number;
+  /** 「今日」の dayKey。これに一致する日(=ライブ層)だけ上境界を引かない。未指定なら最新日を今日扱い。 */
+  todayKey?: string;
 }
 
 function rng(seed: string, salt: number): number {
@@ -142,8 +144,10 @@ export function computeDateBandedPile(entries: EmotionEntry[], opts: BandOptions
     });
     pileTop = dayTop;
 
-    // 最新日には上境界を引かない（それより上は無い）。古い日だけ境界化。
-    if (gi < groups.length - 1) {
+    // 「今日」のバンド(=まだ積み増す層)には上境界を引かない。それ以外（過去日）はすべて
+    // 上境界を引いて層を閉じる。todayKey 未指定時は従来どおり最新日を今日扱い。
+    const isToday = opts.todayKey != null ? g.key === opts.todayKey : gi === groups.length - 1;
+    if (!isToday) {
       // バケットの上面を点へ。欠損は近傍で補間。
       for (let i = 0; i < NB; i++) {
         if (isNaN(bucketTop[i])) {

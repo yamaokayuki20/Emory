@@ -15,6 +15,10 @@ interface Props {
   onCycleMicro?: () => void;
   onPressCalendar?: () => void;
   onPressMenu?: () => void;
+  /** デバッグ: 現在の日付ラベル（例 6/25）。制限解除中のみ日付送り/全消去ボタンを表示。 */
+  dateLabel?: string;
+  onAdvanceDay?: () => void;
+  onClearData?: () => void;
 }
 
 /**
@@ -22,7 +26,7 @@ interface Props {
  * 左: シンプルな顔アイコン / 中央: アプリ名「エモリー」/ 右: カレンダー・メニュー
  * 残り投擲数は右肩に控えめなドットで表示。
  */
-function Header({ remaining, debugUnlimited, onToggleDebug, microLabel, onCycleMicro, onPressCalendar, onPressMenu }: Props) {
+function Header({ remaining, debugUnlimited, onToggleDebug, microLabel, onCycleMicro, onPressCalendar, onPressMenu, dateLabel, onAdvanceDay, onClearData }: Props) {
   return (
     <View style={styles.wrap}>
       <View style={styles.bar}>
@@ -34,6 +38,17 @@ function Header({ remaining, debugUnlimited, onToggleDebug, microLabel, onCycleM
             <Path d="M7 13.5 Q11 16 15 13.5" stroke={text.primary} strokeWidth={1.4} fill="none" strokeLinecap="round" />
           </Svg>
           <Text style={styles.title}>エモリー</Text>
+          {/* デバッグ: 制限解除中だけ日付送り/全消去を出す */}
+          {debugUnlimited && onAdvanceDay && (
+            <Pressable hitSlop={8} onPress={onAdvanceDay} style={styles.dbgBtn}>
+              <Text style={styles.dbgTxt}>{dateLabel || '日付'} +1日</Text>
+            </Pressable>
+          )}
+          {debugUnlimited && onClearData && (
+            <Pressable hitSlop={8} onPress={onClearData} style={styles.dbgBtn}>
+              <Text style={styles.dbgTxt}>全消去</Text>
+            </Pressable>
+          )}
         </View>
 
         <View style={styles.right}>
@@ -106,8 +121,16 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
-  left: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  left: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   title: { fontSize: 16, fontWeight: '600', color: text.primary, letterSpacing: 1 },
+  dbgBtn: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#C57B57',
+    borderRadius: 9,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  dbgTxt: { fontSize: 9, fontWeight: '700', color: '#C57B57', letterSpacing: 0.3 },
   right: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   iconBtn: { padding: 2 },
   dots: { flexDirection: 'row', gap: 2, marginRight: 4, maxWidth: 60, flexWrap: 'wrap' },

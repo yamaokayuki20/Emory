@@ -3,18 +3,22 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   EmotionEntry,
   MAX_STORED_ENTRIES,
+  clearEntries,
   loadEntries,
   makeId,
   saveEntries,
 } from '../storage/entries';
 import { EmotionKey, getEmotion, variationForId } from '../theme/emotions';
-import { seedIfEmpty } from './seed';
+import { initClock, nowISO } from './clock';
+import { clearPileCache } from '../layout/pileCache';
 
 export interface UseEntries {
   entries: EmotionEntry[];
   loading: boolean;
   add: (emotion: EmotionKey, memo?: string) => Promise<EmotionEntry>;
   reload: () => Promise<void>;
+  /** デバッグ: 全データ消去（初回インストール状態に戻す）。 */
+  clearAll: () => Promise<void>;
 }
 
 export function useEntries(): UseEntries {
@@ -38,11 +42,21 @@ export function useEntries(): UseEntries {
     setEntries(loaded);
   }, []);
 
+  const clearAll = useCallback(async () => {
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
+    await clearEntries();
+    await clearPileCache();
+    latestRef.current = [];
+    setEntries([]);
+  }, []);
+
   useEffect(() => {
     (async () => {
-      const seeded = await seedIfEmpty();
-      latestRef.current = seeded;
-      setEntries(seeded);
+      await initClock();
+      // 初回インストール時は空（絵文字層なし）。デモシードは入れない。
+      const loaded = await loadEntries();
+      latestRef.current = loaded;
+      setEntries(loaded);
       setLoading(false);
     })();
     return () => {
@@ -59,7 +73,7 @@ export function useEntries(): UseEntries {
         variation: variationForId(id, emotion),
         color: getEmotion(emotion).color,
         memo: memo?.trim() ? memo.trim() : undefined,
-        createdAt: new Date().toISOString(),
+        createdAt: nowISO(), // デバッグ時計（日付送り対応）
       };
       // メモリに追記（直近のみ保持）。保存はデバウンスで非同期に。
       setEntries((prev) => {
@@ -75,5 +89,5 @@ export function useEntries(): UseEntries {
     [scheduleSave]
   );
 
-  return { entries, loading, add, reload };
+  return { entries, loading, add, reload, clearAll };
 }
