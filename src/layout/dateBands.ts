@@ -161,7 +161,16 @@ export function computeDateBandedPile(entries: EmotionEntry[], opts: BandOptions
           bucketTop[i] = isNaN(lv) ? rv : isNaN(rv) ? lv : (lv + rv) / 2;
         }
       }
-      const points = bucketTop.map((y, i) => ({ x: (i + 0.5) * bucketW, y: y - 2 }));
+      // 線が絵文字に被らないよう、各点を「近傍で最も高い top（=最小y）」より少し上に置く。
+      // こうすると線はその日のボール群の“上の縁”を上側から沿うので、玉を貫かない。
+      // （描画側でこの点列を滑らかな曲線にする。）
+      const clearance = ballSize * 0.42; // ボール半径ぶん＋αだけ持ち上げる
+      const win = 1; // 近傍窓（左右1バケット）
+      const points = bucketTop.map((_, i) => {
+        let hi = Infinity;
+        for (let j = Math.max(0, i - win); j <= Math.min(NB - 1, i + win); j++) if (bucketTop[j] < hi) hi = bucketTop[j];
+        return { x: (i + 0.5) * bucketW, y: hi - clearance };
+      });
       const pillY = points.length ? points[points.length - 1].y : pileTop;
       boundaries.push({ dateKey: g.key, label: g.label, points, pillY });
     }

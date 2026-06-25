@@ -43,7 +43,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b57 daybtn';
+const BUILD = 'b58 floor+border';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -81,6 +81,9 @@ const UFO_FRAC = 0.18; // UFOの表示y（ピッカーの下）
 // 自動で上げる（せり上がる）挙動はしない。
 const TOP_LIMIT_FRAC = 0.56; // 上端がこれより上に来たら下げ補正発動
 const TARGET_FRAC = 0.74; // 山の上面の既定位置（画面のかなり下寄り＝投擲スペースを広く）
+// 箱の床を画面最下部に合わせる余白（床がこの分だけ上＝最下段のボールが見切れない）。
+// 空〜低い山では床を画面下端にアンカーし、山が高くなったら TARGET_FRAC で上端追従に切り替える。
+const FLOOR_MARGIN = 18;
 
 const UFO_SIZE = 58;
 const UFO_OFF = 70;
@@ -102,16 +105,35 @@ function clamp(v: number, lo: number, hi: number) {
  * カメラ移動は親コンテナの translateY 一括変換で行うため、ここは cameraY に依存しない。
  * → スクロール（カメラ移動）では再描画されず、balls が変わった時だけ再描画される。
  */
-/** 日付バンドの境界（点線ポリライン）＋日付ピルを描画（ワールド座標・memo化）。 */
+/** 点列を Catmull-Rom 補間で滑らかな曲線パスにする（全点を通る。端点も保持）。 */
+function smoothPath(pts: { x: number; y: number }[]): string {
+  if (pts.length < 2) return '';
+  if (pts.length === 2) return `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)} L ${pts[1].x.toFixed(1)} ${pts[1].y.toFixed(1)}`;
+  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[i + 2] || p2;
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)} ${cp2x.toFixed(1)} ${cp2y.toFixed(1)} ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`;
+  }
+  return d;
+}
+
+/** 日付バンドの境界（なめらかな点線曲線）＋日付ピルを描画（ワールド座標・memo化）。 */
 const Boundaries = React.memo(function Boundaries({ boundaries, width }: { boundaries: DateBoundary[]; width: number }) {
   return (
     <>
       {boundaries.map((b) => {
         if (b.points.length < 2) return null;
         const ys = b.points.map((p) => p.y);
-        const top = Math.min(...ys) - 4;
-        const h = Math.max(...ys) - top + 8;
-        const d = 'M ' + b.points.map((p) => `${p.x.toFixed(1)} ${(p.y - top).toFixed(1)}`).join(' L ');
+        const top = Math.min(...ys) - 14; // 曲線のオーバーシュート分の余白
+        const h = Math.max(...ys) - top + 28;
+        const d = smoothPath(b.points.map((p) => ({ x: p.x, y: p.y - top })));
         return (
           <React.Fragment key={b.dateKey}>
             <Svg width={width} height={h} style={{ position: 'absolute', left: 0, top }} pointerEvents="none">
@@ -226,13 +248,17 @@ function AddScreen({ entries, onAdd, dateLabel, onAdvanceDay, onClearData }: Pro
   areaRef.current = area;
   const restTopRef = useRef(restTopY);
   restTopRef.current = restTopY;
+  const groundYRef = useRef(groundY);
+  groundYRef.current = groundY;
 
-  // 手動スクロールの範囲（上端＝ライブ表示、下端＝箱の底）
+  // 手動スクロールの範囲（上端＝ライブ表示、下端＝箱の床を画面最下部に）
   const camBounds = useCallback(() => {
     const a = areaRef.current;
-    const liveCam = restTopRef.current - a.h * TARGET_FRAC;
+    const floorCam = groundY - a.h + FLOOR_MARGIN; // 床を画面最下部に合わせるカメラ位置
+    // 床を最下部にアンカー。山が高くなって上端が TARGET_FRAC を超えたら上端追従へ。
+    const liveCam = Math.min(floorCam, restTopRef.current - a.h * TARGET_FRAC);
     const camMin = liveCam - a.h * 0.15; // 少しだけ上も覗ける
-    const camMax = Math.max(liveCam, groundY - a.h * 0.8); // 下スクロールで底
+    const camMax = floorCam; // 下スクロールは床が最下部に来るところまで（床より下は見せない）
     return { liveCam, camMin, camMax };
   }, [groundY]);
 
@@ -304,14 +330,14 @@ function AddScreen({ entries, onAdd, dateLabel, onAdvanceDay, onClearData }: Pro
     }
   }, [area.w, area.h, entries, seed]);
 
-  // 初回だけカメラを合わせる。山があればその上端を、無ければ箱の床を TARGET_FRAC に置く
-  // （＝空っぽ(初回インストール)でも床が見えて、そこへ積み始められる）。
+  // 初回だけカメラを合わせる。床を画面最下部にアンカーしつつ、高い山なら上端を TARGET_FRAC に。
+  // （空っぽ(初回インストール)でも床が画面最下部に来て、そこから積み始められる）。
   const camInitRef = useRef(false);
   useEffect(() => {
     if (!camInitRef.current && area.h > 0) {
       camInitRef.current = true;
-      const base = restTopY < groundY ? restTopY : groundY; // 山頂 or 床
-      const c = base - area.h * TARGET_FRAC;
+      const floorCam = groundY - area.h + FLOOR_MARGIN;
+      const c = Math.min(floorCam, restTopY - area.h * TARGET_FRAC);
       cameraYRef.current = c;
       setCameraY(c);
     }
@@ -328,7 +354,8 @@ function AddScreen({ entries, onAdd, dateLabel, onAdvanceDay, onClearData }: Pro
       if (followRef.current) {
         const a = areaRef.current;
         if (a.h > 0) {
-          const tgt = restTopRef.current - a.h * TARGET_FRAC;
+          const floorCam = groundYRef.current - a.h + FLOOR_MARGIN;
+          const tgt = Math.min(floorCam, restTopRef.current - a.h * TARGET_FRAC);
           setCameraY((prev) => {
             if (tgt >= prev - 0.4) return prev; // 下げ（上昇表示）方向には動かさない
             const next = prev + (tgt - prev) * 0.15;
