@@ -326,6 +326,30 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
     check('T20 固定層スクロール再描画が最小', vis > 30 && delta < vis, `vis=${vis} delta=${delta}`);
   }
 
+  // T21 慣性スクロール(#10): 絵文字層を勢いよくフリックして指を離した後も、カメラが
+  // 慣性で動き続けて滑らかに減速・停止する（離した瞬間に止まらない）。
+  {
+    const ip = await newPage(browser, false, errors);
+    for (let i = 0; i < 90; i++) { await ip.touchscreen.tap(40 + (i % 9) * 38, 185); await sleep(40); }
+    await sleep(4000); // 山を作って静止
+    // 絵文字層を掴む位置（表面より下＝スクロールゾーン。T5 と同じ採り方）。
+    const gy = await ip.evaluate(() => { const s = window.__emorySurf; return Math.round((s ? s(195) : 400) + 60); });
+    // 上へ素早くフリック（層を上へ→カメラは古い層side=camMax へ流れる。スクロール余地あり）。
+    await ip.mouse.move(195, gy); await ip.mouse.down();
+    for (let k = 1; k <= 6; k++) { await ip.mouse.move(195, gy - k * 36); await sleep(12); }
+    await ip.mouse.up();
+    const camAfter = await ip.evaluate(() => window.__emoryCameraY || 0);
+    await sleep(130);
+    const camMid = await ip.evaluate(() => window.__emoryCameraY || 0);
+    await sleep(1000);
+    const camSettled = await ip.evaluate(() => window.__emoryCameraY || 0);
+    await ip.close();
+    // 離した後(camAfter)からさらに動いた=慣性。終盤は減速して落ち着く（暴走しない）。
+    const glided = Math.abs(camSettled - camAfter);
+    const decel = Math.abs(camSettled - camMid) < glided + 1;
+    check('T21 慣性スクロールが効く(#10)', glided > 25 && decel, `after=${Math.round(camAfter)} mid=${Math.round(camMid)} settled=${Math.round(camSettled)} glided=${Math.round(glided)}`);
+  }
+
   check('T12 no console/page errors', errors.length === 0, errors.slice(0, 4).join(' | '));
 
   await browser.close();

@@ -37,7 +37,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b55 pileball';
+const BUILD = 'b56 inertia';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -186,6 +186,9 @@ function AddScreen({ entries, onAdd }: Props) {
   cameraYRef.current = cameraY;
   const followRef = useRef(true);
   const camStartRef = useRef(0);
+  // 慣性スクロールの rAF。フリックで離した後、カメラを減速しながら流す。
+  const momentumRef = useRef<number | null>(null);
+  const momentumTimeRef = useRef(0);
   // パン中の役割（上の空間＝投擲／絵文字層＝スクロール）を開始位置で確定。
   const panZoneRef = useRef<'throw' | 'scroll' | null>(null);
   const panMovedRef = useRef(false);
@@ -226,6 +229,52 @@ function AddScreen({ entries, onAdd }: Props) {
     const camMax = Math.max(liveCam, groundY - a.h * 0.8); // 下スクロールで底
     return { liveCam, camMin, camMax };
   }, [groundY]);
+
+  // 慣性スクロール: フリックで離した瞬間の速度からカメラを減速させながら動かす。
+  const cancelMomentum = useCallback(() => {
+    if (momentumRef.current != null) {
+      cancelAnimationFrame(momentumRef.current);
+      momentumRef.current = null;
+    }
+  }, []);
+
+  const startMomentum = useCallback(
+    (camVel0: number) => {
+      cancelMomentum();
+      let vel = camVel0; // カメラ空間 px/s（指の動きと逆向き）
+      const DECAY = 3.2; // 1秒あたりの指数減衰率（大きいほど早く止まる）
+      const MIN_VEL = 24; // これ未満で停止（px/s）
+      momentumTimeRef.current = performance.now();
+      const step = () => {
+        const now = performance.now();
+        let dt = (now - momentumTimeRef.current) / 1000;
+        momentumTimeRef.current = now;
+        if (dt > 0.05) dt = 0.05; // 取りこぼし時の飛びを抑制
+        vel *= Math.exp(-DECAY * dt);
+        const { camMin, camMax, liveCam } = camBounds();
+        let next = cameraYRef.current + vel * dt;
+        if (next <= camMin) { next = camMin; vel = 0; }
+        else if (next >= camMax) { next = camMax; vel = 0; }
+        cameraYRef.current = next;
+        setCameraY(next);
+        if (Math.abs(vel) < MIN_VEL) {
+          momentumRef.current = null;
+          if (next <= liveCam + 40) followRef.current = true; // 最上部付近ならライブ追従へ復帰
+          return;
+        }
+        momentumRef.current = requestAnimationFrame(step);
+      };
+      momentumRef.current = requestAnimationFrame(step);
+    },
+    [camBounds, cancelMomentum]
+  );
+
+  useEffect(() => cancelMomentum, [cancelMomentum]);
+
+  // 自己テスト用(実害なし): 現在のカメラy。慣性スクロールの検証に使う。
+  useEffect(() => {
+    if (typeof window !== 'undefined') (window as unknown as { __emoryCameraY?: number }).__emoryCameraY = cameraY;
+  }, [cameraY]);
 
   // 残数・デバッグ
   useEffect(() => {
@@ -450,6 +499,7 @@ function AddScreen({ entries, onAdd }: Props) {
           // 絵文字層を掴む＝スクロールゾーン
           panZoneRef.current = 'scroll';
           followRef.current = false;
+          cancelMomentum(); // 流れている最中に掴んだら止める
           camStartRef.current = cameraYRef.current;
         }
         return;
@@ -476,11 +526,18 @@ function AddScreen({ entries, onAdd }: Props) {
         }
         setHeld(null);
       } else if (zone === 'scroll') {
-        const { liveCam } = camBounds();
-        if (cameraYRef.current <= liveCam + 40) followRef.current = true;
+        // 勢いよく離したら慣性スクロール。カメラは指の動き(translationY)と逆向きに動くので
+        // カメラ速度 = -velocityY。ゆっくり離した時は流さず、その場で確定する。
+        const camVel = clamp(-velocityY, -4200, 4200);
+        if (st === State.END && Math.abs(velocityY) > 120) {
+          startMomentum(camVel);
+        } else {
+          const { liveCam } = camBounds();
+          if (cameraYRef.current <= liveCam + 40) followRef.current = true;
+        }
       }
     },
-    [camBounds, doLaunch, surfaceScreenYAt]
+    [camBounds, doLaunch, surfaceScreenYAt, startMomentum]
   );
 
   const toggleDebug = useCallback(async () => {
