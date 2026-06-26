@@ -43,7 +43,7 @@ interface Props {
 
 const BALL = 46;
 // ビルド識別（キャッシュ判別用。デプロイのたびに更新）
-const BUILD = 'b59 seamline';
+const BUILD = 'b60 keeppos';
 
 // 固定層の可視判定マージン
 const CULL_MARGIN = BALL * 2;
@@ -472,7 +472,7 @@ function AddScreen({ entries, onAdd, dateLabel, onAdvanceDay, onClearData }: Pro
       setRemaining(state.remaining);
       const entry = await onAdd(selected);
       const worldY = cameraYRef.current + spawnScreenY;
-      drop(selected, entry.variation, spawnX, worldY, vx, vy);
+      drop(selected, entry.variation, spawnX, worldY, vx, vy, entry.id);
       followRef.current = true;
       // デバッグ用の投擲カウンタ（自己テストの計測に使用。実害なし）。
       if (typeof window !== 'undefined') {

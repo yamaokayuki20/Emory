@@ -3,9 +3,10 @@ import Matter from 'matter-js';
 
 import { EmotionEntry } from '../storage/entries';
 import { EmotionKey } from '../theme/emotions';
-import { DateBoundary } from '../layout/dateBands';
+import { DateBoundary, computeBoundaries } from '../layout/dateBands';
 import { loadOrComputeBandedPile } from '../layout/pileCache';
-import { todayKey } from '../state/clock';
+import { dayKeyOf, todayKey } from '../state/clock';
+import { Pos, loadPositions, savePositions } from '../state/positions';
 
 export interface BoxBall {
   bodyId: number;
@@ -24,6 +25,7 @@ interface BallMeta {
   hitUfo: boolean;
   hitGoal: boolean;
   prevY: number; // 前フレームのy（リング面の上→下クロス判定用）
+  entryId?: string; // 対応する記録ID（着地位置の永続保存に使う）
 }
 
 interface Options {
@@ -41,7 +43,7 @@ interface BoxApi {
   restTopY: number; // 着地済みの山の最上端（飛行中は無視）
   activeCount: number; // 動いているボール数
   groundY: number;
-  drop: (emotion: EmotionKey, variation: number, x: number, y: number, vx: number, vy: number) => void;
+  drop: (emotion: EmotionKey, variation: number, x: number, y: number, vx: number, vy: number, entryId?: string) => void;
   seed: (entries: EmotionEntry[]) => void;
   setTarget: (t: { x: number; y: number; r: number } | null) => void;
   consumeHit: () => { x: number; y: number } | null;
@@ -125,6 +127,9 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   const colTopRef = useRef<{ tops: number[]; colW: number } | null>(null);
   // 自己テスト用: 直近に落としたボディ（すり抜け検出）。
   const lastDropRef = useRef<Matter.Body | null>(null);
+  // 各記録(entryId)の実着地位置。落ち着いたら更新し、定期的に永続保存する（並べたまま復元用）。
+  const posMapRef = useRef<Record<string, Pos>>({});
+  const posDirtyRef = useRef(false);
 
   const [balls, setBalls] = useState<BoxBall[]>([]);
   const [frozenVersion, setFrozenVersion] = useState(0);
@@ -298,6 +303,15 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         const top = b.position.y - m.size / 2;
         if (top < colTop[ci]) colTop[ci] = top;
         if ((b.isStatic || b.isSleeping) && top < settledTopCol[ci]) settledTopCol[ci] = top;
+        // 落ち着いた（静的/眠り）記録の位置を保存マップへ（並べたまま復元用）。
+        if (m.entryId && (b.isStatic || b.isSleeping)) {
+          const nx = Math.round(b.position.x), ny = Math.round(b.position.y), na = Math.round(b.angle * 100) / 100;
+          const cur = posMapRef.current[m.entryId];
+          if (!cur || cur.x !== nx || cur.y !== ny || cur.a !== na) {
+            posMapRef.current[m.entryId] = { x: nx, y: ny, a: na };
+            posDirtyRef.current = true;
+          }
+        }
       }
       colTopRef.current = { tops: colTop, colW }; // 生成可否判定用に公開
       // settledTopCol の隙間/端を近傍で埋める（検出用の連続な表面）。
@@ -507,8 +521,20 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     };
   }, [width]);
 
+  // 実着地位置を定期的に永続保存（変化があった時だけ）。日付送り/再起動で並べたまま復元できる。
+  useEffect(() => {
+    if (width <= 0) return;
+    const t = setInterval(() => {
+      if (posDirtyRef.current) {
+        posDirtyRef.current = false;
+        void savePositions(width, ballSize, posMapRef.current);
+      }
+    }, 1500);
+    return () => clearInterval(t);
+  }, [width, ballSize]);
+
   const addBody = useCallback(
-    (emotion: EmotionKey, variation: number, x: number, y: number) => {
+    (emotion: EmotionKey, variation: number, x: number, y: number, entryId?: string) => {
       const engine = engineRef.current;
       if (!engine) return;
       const body = Matter.Bodies.circle(x, y, ballSize * 0.44, {
@@ -520,7 +546,7 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
         slop: 0.002,
       });
       body.sleepThreshold = 16; // 早めに眠らせる→早く固定→揺れを早く止める
-      metaRef.current.set(body.id, { emotion, variation, size: ballSize, hitUfo: false, hitGoal: false, prevY: y });
+      metaRef.current.set(body.id, { emotion, variation, size: ballSize, hitUfo: false, hitGoal: false, prevY: y, entryId });
       Matter.Composite.add(engine.world, body);
       return body;
     },
@@ -528,8 +554,8 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
   );
 
   const drop = useCallback(
-    (emotion: EmotionKey, variation: number, x: number, y: number, vx: number, vy: number) => {
-      const body = addBody(emotion, variation, x, y);
+    (emotion: EmotionKey, variation: number, x: number, y: number, vx: number, vy: number, entryId?: string) => {
+      const body = addBody(emotion, variation, x, y, entryId);
       if (body) {
         Matter.Body.setVelocity(body, { x: vx, y: vy });
         lastDropRef.current = body;
@@ -542,26 +568,43 @@ export function useBoxPhysics({ width, ballSize = 46 }: Options): BoxApi {
     (entries: EmotionEntry[]) => {
       if (seededRef.current || !engineRef.current || width <= 0) return;
       seededRef.current = true;
-      // 【Phase 1】ベイク済みレイアウトを永続キャッシュから読む（無ければ計算して保存）。
-      // 物理 settle を起動毎に回さない。位置・境界・見た目は computeDateBandedPile と同一。
-      loadOrComputeBandedPile(entries, { width, ballSize, groundY: GROUND_Y, todayKey: todayKey() })
-        .then(({ placements, boundaries, topY }) => {
-          // await 中にアンマウント/再初期化された場合は中断（再シードできるようフラグを戻す）。
-          if (!engineRef.current) {
-            seededRef.current = false;
+      const r = ballSize * 0.44;
+      // まず保存済みの「実際の着地位置」を読む。全エントリに位置があれば、その位置に
+      // そのまま復元する（＝並べ替えない）。1つでも欠ければバンド計算にフォールバック。
+      loadPositions(width, ballSize)
+        .then((posMap) => {
+          if (!engineRef.current) { seededRef.current = false; return; }
+          posMapRef.current = { ...posMap };
+          const allPositioned = entries.length > 0 && entries.every((e) => posMap[e.id]);
+          if (allPositioned) {
+            let topY = GROUND_Y;
+            for (const e of entries) {
+              const p = posMap[e.id];
+              const body = addBody(e.emotion, e.variation, p.x, p.y, e.id);
+              if (body) { Matter.Body.setAngle(body, p.a); Matter.Sleeping.set(body, true); }
+              if (p.y - r < topY) topY = p.y - r;
+            }
+            const placements = entries.map((e) => ({ x: posMap[e.id].x, y: posMap[e.id].y, dateKey: dayKeyOf(e.createdAt) }));
+            restTopRef.current = topY;
+            setBoundaries(computeBoundaries(placements, { width, ballSize, todayKey: todayKey() }));
+            setMeta({ restTopY: topY, activeCount: 0 });
             return;
           }
-          for (const p of placements) {
-            const body = addBody(p.emotion, p.variation, p.x, p.y);
-            if (body) Matter.Sleeping.set(body, true);
-          }
-          restTopRef.current = topY;
-          setBoundaries(boundaries);
-          setMeta({ restTopY: topY, activeCount: 0 });
+          // フォールバック: ベイク済みバンドレイアウト（キャッシュ）。位置は settle 後に記録・保存される。
+          loadOrComputeBandedPile(entries, { width, ballSize, groundY: GROUND_Y, todayKey: todayKey() })
+            .then(({ placements, boundaries, topY }) => {
+              if (!engineRef.current) { seededRef.current = false; return; }
+              for (const p of placements) {
+                const body = addBody(p.emotion, p.variation, p.x, p.y, p.id);
+                if (body) Matter.Sleeping.set(body, true);
+              }
+              restTopRef.current = topY;
+              setBoundaries(boundaries);
+              setMeta({ restTopY: topY, activeCount: 0 });
+            })
+            .catch(() => { seededRef.current = false; });
         })
-        .catch(() => {
-          seededRef.current = false;
-        });
+        .catch(() => { seededRef.current = false; });
     },
     [addBody, ballSize, width]
   );

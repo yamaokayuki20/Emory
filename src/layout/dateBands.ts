@@ -11,6 +11,7 @@ import { BODY_RADIUS_RATIO } from './settlePile';
  */
 
 export interface BandedPlacement {
+  id: string; // 対応する記録ID（位置の永続保存に使う）
   emotion: EmotionKey;
   variation: number;
   x: number;
@@ -170,34 +171,64 @@ export function computeDateBandedPile(entries: EmotionEntry[], opts: BandOptions
   let topY = groundY;
   for (const b of allBodies) {
     const m = b as unknown as { _e: EmotionEntry; _key: string };
-    placements.push({ emotion: m._e.emotion, variation: m._e.variation, x: b.position.x, y: b.position.y, dateKey: m._key });
+    placements.push({ id: m._e.id, emotion: m._e.emotion, variation: m._e.variation, x: b.position.x, y: b.position.y, dateKey: m._key });
     if (b.position.y - r < topY) topY = b.position.y - r;
   }
 
-  // ── 日付境界線を最終位置から引く（日と日の継ぎ目を縫う＝両側の玉に被らない）。
-  const byDay = new Map<string, Matter.Body[]>();
-  for (const b of allBodies) {
-    const k = (b as unknown as { _key: string })._key;
-    if (!byDay.has(k)) byDay.set(k, []);
-    byDay.get(k)!.push(b);
-  }
-  const todayKeyResolved = opts.todayKey != null ? opts.todayKey : (groups.length ? groups[groups.length - 1].key : '');
-  // 最新の過去日(=昨日)の index。「昨日」の上には線を引かない（一昨日から引く）。
-  let newestPast = -1;
-  groups.forEach((g, gi) => { if (g.key !== todayKeyResolved) newestPast = gi; });
+  // 日付境界線は最終位置から計算（位置復元パスでも同じ関数を使う）。
+  for (const bd of computeBoundaries(placements, { width, ballSize, todayKey: opts.todayKey })) boundaries.push(bd);
 
+  Matter.World.clear(engine.world, false);
+  Matter.Engine.clear(engine);
+
+  return { placements, boundaries, topY };
+}
+
+function keyToTime(k: string): number {
+  const [y, m, d] = k.split('-').map(Number);
+  return new Date(y, (m || 1) - 1, d || 1).getTime();
+}
+function keyToLabel(k: string): string {
+  const [, m, d] = k.split('-').map(Number);
+  return `${m}月${d}日`;
+}
+
+/**
+ * 配置(placements: x,y,dateKey)から日付境界線を引く。位置復元パスと共用。
+ * - 「昨日(最新の過去日)」の上には引かない（一昨日から）。
+ * - 各バケットで「下の日の上面」と「上の日の下面」の中点を縫う＝両側の玉に被りにくい。
+ */
+export function computeBoundaries(
+  placements: { x: number; y: number; dateKey: string }[],
+  opts: { width: number; ballSize: number; todayKey?: string }
+): DateBoundary[] {
+  const { width, ballSize } = opts;
+  const r = ballSize * BODY_RADIUS_RATIO;
+  const NB = Math.max(6, Math.min(28, Math.round(width / 22)));
+  const bucketW = width / NB;
   const colOf = (x: number) => Math.max(0, Math.min(NB - 1, Math.floor(x / bucketW)));
-  for (let gi = 0; gi < groups.length; gi++) {
-    const g = groups[gi];
-    if (g.key === todayKeyResolved) continue; // 今日には上線なし
-    if (gi === newestPast) continue;          // 昨日の上線は引かない（#1）
-    const lower = byDay.get(g.key) || [];                 // この日（下側）
-    const upper = gi + 1 < groups.length ? byDay.get(groups[gi + 1].key) || [] : []; // 次の新しい日（上側）
-    const lowTop = new Array<number>(NB).fill(NaN); // 下の日の上面（最小 y - r）
-    const upBot = new Array<number>(NB).fill(NaN);  // 上の日の下面（最大 y + r）
-    for (const b of lower) { const bi = colOf(b.position.x); const t = b.position.y - r; if (isNaN(lowTop[bi]) || t < lowTop[bi]) lowTop[bi] = t; }
-    for (const b of upper) { const bi = colOf(b.position.x); const bo = b.position.y + r; if (isNaN(upBot[bi]) || bo > upBot[bi]) upBot[bi] = bo; }
-    // 下の日の上面の欠損を近傍で補間（線を連続させる）。
+
+  const byDay = new Map<string, { x: number; y: number }[]>();
+  for (const p of placements) {
+    if (!byDay.has(p.dateKey)) byDay.set(p.dateKey, []);
+    byDay.get(p.dateKey)!.push(p);
+  }
+  const dayKeys = [...byDay.keys()].sort((a, b) => keyToTime(a) - keyToTime(b)); // 古い→新しい
+  const todayKeyResolved = opts.todayKey != null ? opts.todayKey : (dayKeys.length ? dayKeys[dayKeys.length - 1] : '');
+  let newestPast = -1;
+  dayKeys.forEach((k, i) => { if (k !== todayKeyResolved) newestPast = i; });
+
+  const out: DateBoundary[] = [];
+  for (let di = 0; di < dayKeys.length; di++) {
+    const k = dayKeys[di];
+    if (k === todayKeyResolved) continue; // 今日には上線なし
+    if (di === newestPast) continue;      // 昨日の上線は引かない（一昨日から）
+    const lower = byDay.get(k)!;                                   // この日（下）
+    const upper = di + 1 < dayKeys.length ? byDay.get(dayKeys[di + 1])! : []; // 次の新しい日（上）
+    const lowTop = new Array<number>(NB).fill(NaN);
+    const upBot = new Array<number>(NB).fill(NaN);
+    for (const p of lower) { const bi = colOf(p.x); const t = p.y - r; if (isNaN(lowTop[bi]) || t < lowTop[bi]) lowTop[bi] = t; }
+    for (const p of upper) { const bi = colOf(p.x); const bo = p.y + r; if (isNaN(upBot[bi]) || bo > upBot[bi]) upBot[bi] = bo; }
     for (let i = 1; i < NB; i++) if (isNaN(lowTop[i]) && !isNaN(lowTop[i - 1])) lowTop[i] = lowTop[i - 1];
     for (let i = NB - 2; i >= 0; i--) if (isNaN(lowTop[i]) && !isNaN(lowTop[i + 1])) lowTop[i] = lowTop[i + 1];
     const pts: { x: number; y: number }[] = [];
@@ -205,16 +236,10 @@ export function computeDateBandedPile(entries: EmotionEntry[], opts: BandOptions
       const lt = lowTop[i];
       if (isNaN(lt)) continue;
       const ub = upBot[i];
-      // 上の日の下面が下の日の上面より高い（=隙間あり）なら中点を縫う。隙間が無ければ
-      // 下の日の上面のすぐ上に置く（下の日を貫かない最小限のクリアランス）。
       const y = !isNaN(ub) && ub < lt - 1 ? (lt + ub) / 2 : lt - ballSize * 0.16;
       pts.push({ x: (i + 0.5) * bucketW, y });
     }
-    if (pts.length >= 2) boundaries.push({ dateKey: g.key, label: g.label, points: pts, pillY: pts[pts.length - 1].y });
+    if (pts.length >= 2) out.push({ dateKey: k, label: keyToLabel(k), points: pts, pillY: pts[pts.length - 1].y });
   }
-
-  Matter.World.clear(engine.world, false);
-  Matter.Engine.clear(engine);
-
-  return { placements, boundaries, topY };
+  return out;
 }

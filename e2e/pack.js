@@ -271,23 +271,25 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
     check('T16 すり抜け: 凸凹な表面でも潜り込まない', slip === 0, `slipped=${slip} ${JSON.stringify(bad)}`);
   }
 
-  // T17 永続キャッシュ(Phase 1): 初回ロードで baked レイアウトを保存(miss)、同コンテキストの
-  // リロードで命中(hit)し、物理 settle を回さず同一レイアウト(placements)を復元する。
+  // T17 位置の永続・並べたまま復元: 着地位置を保存し、再読込で再レイアウトせず同じ位置に戻す。
   {
     const cp = await newPage(browser, false, errors);
-    const readPile = () => cp.evaluate(() => {
-      const raw = localStorage.getItem('emory.pile');
-      const c = raw ? JSON.parse(raw) : null;
-      return { cache: window.__emoryPileCache, sig: c && c.sig, pl: c && c.pile && JSON.stringify(c.pile.placements) };
+    await cp.evaluate(() => new Promise((r) => setTimeout(r, 2500))); // 位置保存(1.5s間隔)を待つ
+    // 8px量子化した位置集合で比較（眠っているので原則不動だが微小settle差を許容）。
+    const dumpSet = () => cp.evaluate(() => {
+      const f = window.__emoryAllDump ? window.__emoryAllDump() : [];
+      return { hasPos: !!localStorage.getItem('emory.positions.v1'), set: f.map((p) => `${Math.round(p[0] / 8)},${Math.round(p[1] / 8)}`) };
     });
-    const first = await readPile();
+    const first = await dumpSet();
     await cp.reload({ waitUntil: 'networkidle0', timeout: 60000 });
-    await sleep(3200);
-    const second = await readPile();
+    await sleep(3500);
+    const second = await dumpSet();
     await cp.close();
-    const same = !!first.pl && first.pl === second.pl && first.sig === second.sig;
-    check('T17 永続キャッシュ: 再読込で命中し同一レイアウト', first.cache === 'miss' && second.cache === 'hit' && same,
-      `first=${first.cache} second=${second.cache} same=${same}`);
+    const b = new Set(second.set);
+    let same = 0; for (const k of first.set) if (b.has(k)) same++;
+    const ratio = first.set.length ? same / first.set.length : 0;
+    check('T17 位置の永続・並べたまま復元', first.hasPos && first.set.length > 0 && ratio >= 0.85 && Math.abs(first.set.length - second.set.length) <= 3,
+      `hasPos=${first.hasPos} n1=${first.set.length} n2=${second.set.length} ratio=${ratio.toFixed(2)}`);
   }
 
   // T18 履歴保持(Phase 2): 旧上限180を超えて積んでも固定データを破棄しない（=下層/記録が

@@ -11,6 +11,7 @@ import {
 import { EmotionKey, getEmotion, variationForId } from '../theme/emotions';
 import { initClock, nowISO } from './clock';
 import { clearPileCache } from '../layout/pileCache';
+import { clearPositions } from './positions';
 
 export interface UseEntries {
   entries: EmotionEntry[];
@@ -46,6 +47,7 @@ export function useEntries(): UseEntries {
     if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
     await clearEntries();
     await clearPileCache();
+    await clearPositions();
     latestRef.current = [];
     setEntries([]);
   }, []);
