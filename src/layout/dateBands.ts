@@ -132,48 +132,11 @@ export function computeDateBandedPile(entries: EmotionEntry[], opts: BandOptions
     });
     for (let s = 0; s < stepsPerDay; s++) Matter.Engine.update(engine, 16);
 
-    // この日の上面をサンプリング（境界の点線用）。配置(placements)はすべての日を積んでから
-    // 最終位置で記録する（後続の日が前の日を押し込んで重なるのを避けるため）。
-    const bucketTop: number[] = new Array(NB).fill(NaN);
+    // この日の上端だけ求めて、次の日の積み始め高さにする。
+    // 境界線は全日 settle 後に「最終位置」から日と日の継ぎ目を縫って引く（後述）。
     let dayTop = pileTop;
-    dayBodies.forEach((b) => {
-      const top = b.position.y - r;
-      if (top < dayTop) dayTop = top;
-      const bi = Math.max(0, Math.min(NB - 1, Math.floor(b.position.x / bucketW)));
-      if (isNaN(bucketTop[bi]) || top < bucketTop[bi]) bucketTop[bi] = top;
-    });
+    dayBodies.forEach((b) => { const top = b.position.y - r; if (top < dayTop) dayTop = top; });
     pileTop = dayTop;
-
-    // 「今日」のバンド(=まだ積み増す層)には上境界を引かない。それ以外（過去日）はすべて
-    // 上境界を引いて層を閉じる。todayKey 未指定時は従来どおり最新日を今日扱い。
-    const isToday = opts.todayKey != null ? g.key === opts.todayKey : gi === groups.length - 1;
-    if (!isToday) {
-      // バケットの上面を点へ。欠損は近傍で補間。
-      for (let i = 0; i < NB; i++) {
-        if (isNaN(bucketTop[i])) {
-          // 左右の最も近い有効値
-          let l = i - 1;
-          while (l >= 0 && isNaN(bucketTop[l])) l--;
-          let rr2 = i + 1;
-          while (rr2 < NB && isNaN(bucketTop[rr2])) rr2++;
-          const lv = l >= 0 ? bucketTop[l] : NaN;
-          const rv = rr2 < NB ? bucketTop[rr2] : NaN;
-          bucketTop[i] = isNaN(lv) ? rv : isNaN(rv) ? lv : (lv + rv) / 2;
-        }
-      }
-      // 線が絵文字に被らないよう、各点を「近傍で最も高い top（=最小y）」より少し上に置く。
-      // こうすると線はその日のボール群の“上の縁”を上側から沿うので、玉を貫かない。
-      // （描画側でこの点列を滑らかな曲線にする。）
-      const clearance = ballSize * 0.42; // ボール半径ぶん＋αだけ持ち上げる
-      const win = 1; // 近傍窓（左右1バケット）
-      const points = bucketTop.map((_, i) => {
-        let hi = Infinity;
-        for (let j = Math.max(0, i - win); j <= Math.min(NB - 1, i + win); j++) if (bucketTop[j] < hi) hi = bucketTop[j];
-        return { x: (i + 0.5) * bucketW, y: hi - clearance };
-      });
-      const pillY = points.length ? points[points.length - 1].y : pileTop;
-      boundaries.push({ dateKey: g.key, label: g.label, points, pillY });
-    }
   });
 
   // 全日を積んだ後、しっかり settle。
@@ -209,6 +172,45 @@ export function computeDateBandedPile(entries: EmotionEntry[], opts: BandOptions
     const m = b as unknown as { _e: EmotionEntry; _key: string };
     placements.push({ emotion: m._e.emotion, variation: m._e.variation, x: b.position.x, y: b.position.y, dateKey: m._key });
     if (b.position.y - r < topY) topY = b.position.y - r;
+  }
+
+  // ── 日付境界線を最終位置から引く（日と日の継ぎ目を縫う＝両側の玉に被らない）。
+  const byDay = new Map<string, Matter.Body[]>();
+  for (const b of allBodies) {
+    const k = (b as unknown as { _key: string })._key;
+    if (!byDay.has(k)) byDay.set(k, []);
+    byDay.get(k)!.push(b);
+  }
+  const todayKeyResolved = opts.todayKey != null ? opts.todayKey : (groups.length ? groups[groups.length - 1].key : '');
+  // 最新の過去日(=昨日)の index。「昨日」の上には線を引かない（一昨日から引く）。
+  let newestPast = -1;
+  groups.forEach((g, gi) => { if (g.key !== todayKeyResolved) newestPast = gi; });
+
+  const colOf = (x: number) => Math.max(0, Math.min(NB - 1, Math.floor(x / bucketW)));
+  for (let gi = 0; gi < groups.length; gi++) {
+    const g = groups[gi];
+    if (g.key === todayKeyResolved) continue; // 今日には上線なし
+    if (gi === newestPast) continue;          // 昨日の上線は引かない（#1）
+    const lower = byDay.get(g.key) || [];                 // この日（下側）
+    const upper = gi + 1 < groups.length ? byDay.get(groups[gi + 1].key) || [] : []; // 次の新しい日（上側）
+    const lowTop = new Array<number>(NB).fill(NaN); // 下の日の上面（最小 y - r）
+    const upBot = new Array<number>(NB).fill(NaN);  // 上の日の下面（最大 y + r）
+    for (const b of lower) { const bi = colOf(b.position.x); const t = b.position.y - r; if (isNaN(lowTop[bi]) || t < lowTop[bi]) lowTop[bi] = t; }
+    for (const b of upper) { const bi = colOf(b.position.x); const bo = b.position.y + r; if (isNaN(upBot[bi]) || bo > upBot[bi]) upBot[bi] = bo; }
+    // 下の日の上面の欠損を近傍で補間（線を連続させる）。
+    for (let i = 1; i < NB; i++) if (isNaN(lowTop[i]) && !isNaN(lowTop[i - 1])) lowTop[i] = lowTop[i - 1];
+    for (let i = NB - 2; i >= 0; i--) if (isNaN(lowTop[i]) && !isNaN(lowTop[i + 1])) lowTop[i] = lowTop[i + 1];
+    const pts: { x: number; y: number }[] = [];
+    for (let i = 0; i < NB; i++) {
+      const lt = lowTop[i];
+      if (isNaN(lt)) continue;
+      const ub = upBot[i];
+      // 上の日の下面が下の日の上面より高い（=隙間あり）なら中点を縫う。隙間が無ければ
+      // 下の日の上面のすぐ上に置く（下の日を貫かない最小限のクリアランス）。
+      const y = !isNaN(ub) && ub < lt - 1 ? (lt + ub) / 2 : lt - ballSize * 0.16;
+      pts.push({ x: (i + 0.5) * bucketW, y });
+    }
+    if (pts.length >= 2) boundaries.push({ dateKey: g.key, label: g.label, points: pts, pillY: pts[pts.length - 1].y });
   }
 
   Matter.World.clear(engine.world, false);

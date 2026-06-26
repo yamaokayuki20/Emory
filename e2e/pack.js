@@ -394,29 +394,30 @@ const aboveSurf = (p, x) => p.evaluate((xx) => {
   // そのまま残り(引き継ぎ)、過去日として境界線で閉じる。さらに翌日ぶんを上に積める。
   {
     const dp = await newPage(browser, false, errors, { empty: true });
-    for (let i = 0; i < 12; i++) { await dp.touchscreen.tap(70 + (i % 6) * 42, 175); await sleep(120); }
-    await dp.evaluate(() => new Promise((r) => setTimeout(r, 3500)));
-    // 箱の中のボール総数(物理+固定)＝積んだ記録の数。境界線の数も見る。
     const snap = () => dp.evaluate(() => ({ n: (window.__emoryAllDump ? window.__emoryAllDump() : []).length, bnd: window.__emoryBoundaryCount || 0 }));
-    const before = await snap();
-    // ヘッダーの「+1日」ボタンを押す（制限解除中に表示）。
-    const btn = await dp.evaluate(() => { const el = [...document.querySelectorAll('*')].find((e) => /\+1日/.test(e.textContent || '') && e.children.length === 0); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; });
-    let after = { n: 0, bnd: 0 };
-    if (btn) {
-      await dp.touchscreen.tap(btn.x, btn.y);
+    const advance = async () => {
+      const btn = await dp.evaluate(() => { const el = [...document.querySelectorAll('*')].find((e) => /\+1日/.test(e.textContent || '') && e.children.length === 0); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; });
+      if (btn) await dp.touchscreen.tap(btn.x, btn.y);
       await dp.evaluate(() => new Promise((r) => setTimeout(r, 5000))); // 再マウント＋再シード＋settle
-      after = await snap();
-      // 翌日ぶんを少し積む（上に乗る）
-      for (let i = 0; i < 5; i++) { await dp.touchscreen.tap(90 + (i % 4) * 42, 175); await sleep(150); }
-      await dp.evaluate(() => new Promise((r) => setTimeout(r, 2500)));
-    }
-    const afterThrow = (await snap()).n;
+      return !!btn;
+    };
+    // 1日目を積む
+    for (let i = 0; i < 8; i++) { await dp.touchscreen.tap(70 + (i % 6) * 42, 175); await sleep(120); }
+    await dp.evaluate(() => new Promise((r) => setTimeout(r, 3000)));
+    const d0 = await snap();
+    const ok1 = await advance(); // 1日目→昨日（昨日の上には線を引かない）
+    const a1 = await snap();
+    // 2日目を積む
+    for (let i = 0; i < 6; i++) { await dp.touchscreen.tap(90 + (i % 4) * 42, 175); await sleep(140); }
+    await dp.evaluate(() => new Promise((r) => setTimeout(r, 3000)));
+    const ok2 = await advance(); // 1日目→一昨日（ここで初めて境界が引かれる）、2日目→昨日
+    const a2 = await snap();
     await dp.close();
-    // 引き継ぎ: 送った後も積んだ分(~12)が残る。過去日として境界が1本以上引かれる。翌日ぶんで増える。
-    const carried = !!btn && after.n >= before.n - 1 && after.n >= 8;
-    const closed = !!btn && after.bnd >= 1 && before.bnd === 0;
-    check('T23 日跨ぎでデータ引き継ぎ＋境界化', carried && closed && afterThrow > after.n,
-      `before=${before.n}/${before.bnd} after=${after.n}/${after.bnd} afterThrow=${afterThrow}`);
+    // 引き継ぎ: 2回送っても積んだ分(8+6)は残る。昨日だけのときは線なし、一昨日が出来たら線が引かれる。
+    const carried = ok1 && ok2 && a2.n >= d0.n + 5;
+    const lineRule = a1.bnd === 0 && a2.bnd >= 1;
+    check('T23 日跨ぎ引き継ぎ＋一昨日から境界(#1)', carried && lineRule,
+      `d0=${d0.n}/${d0.bnd} a1=${a1.n}/${a1.bnd} a2=${a2.n}/${a2.bnd}`);
   }
 
   check('T12 no console/page errors', errors.length === 0, errors.slice(0, 4).join(' | '));
